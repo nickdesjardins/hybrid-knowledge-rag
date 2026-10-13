@@ -1,0 +1,30 @@
+# --- API -----------------------------------------------------------------------
+fastapi>=0.115,<1.0
+uvicorn[standard]>=0.30,<1.0
+python-multipart>=0.0.12
+
+# --- Validation / configuration ------------------------------------------------
+pydantic>=2.8,<3
+pydantic-settings>=2.4,<3
+python-dotenv>=1.0
+
+# --- Database (PostgreSQL 16 + pgvector) ---------------------------------------
+SQLAlchemy[asyncio]>=2.0.36,<2.2
+asyncpg>=0.30
+
+# --- Model providers -----------------------------------------------------------
+anthropic>=1.0,<2          # contextualizer worker + grounded generation (Claude)
+openai>=2.0,<4             # text-embedding-3-* embeddings (and optional generation)
+cohere>=5.13,<8            # Rerank v3.5 cross-encoder
+
+# --- Ingestion -----------------------------------------------------------------
+pymupdf>=1.25
+numpy>=1.26
+
+# --- Tests ---------------------------------------------------------------------
+httpx>=0.27,<1.0
+pytest>=8.3
+pytest-asyncio>=0.24
+
+# --- Optional: local embeddings ------------------------------------------------
+# fastembed>=0.7            # EMBEDDING_PROVIDER=fastembed
