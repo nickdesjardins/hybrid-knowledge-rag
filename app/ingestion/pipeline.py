@@ -104,10 +104,12 @@ async def ingest_pdf(
     document_id = await components.store.store_document(
         title=parsed.title, filename=filename, chunks=records, page_count=parsed.page_count
     )
-    # Every write goes through here, so this is where a cached corpus listing goes stale.
-    invalidate = getattr(getattr(components, "catalogue", None), "invalidate", None)
-    if callable(invalidate):
-        invalidate()
+    # Every write goes through here, so this is where the cached corpus listing and the vector
+    # map's projection of the corpus go stale.
+    for cache in ("catalogue", "vector_map"):
+        invalidate = getattr(getattr(components, cache, None), "invalidate", None)
+        if callable(invalidate):
+            invalidate()
     elapsed_ms = (time.perf_counter() - started) * 1000.0
     logger.info(
         "Ingested %s: %d pages, %d chunks in %.0f ms",

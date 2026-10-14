@@ -24,6 +24,8 @@ from sqlalchemy.ext.asyncio import (
 
 from app.config import Settings
 from app.errors import ConfigurationError
+from app.ingestion.chunker import page_for_offset
+from app.retrieval.vector_map import ChunkVector, preview_of
 from app.schemas import DocumentSummary
 
 logger = logging.getLogger(__name__)
@@ -113,6 +115,22 @@ _LIST_DOCUMENTS_SQL = text(
     LEFT JOIN document_chunks AS c ON c.document_id = d.id
     GROUP BY d.id, d.title, d.filename, d.created_at, d.page_count
     ORDER BY d.created_at ASC, d.title ASC
+    """
+)
+
+#: Every chunk with its embedding, for the vector map. The order is the corpus listing's (then
+#: the document id, so two documents with the same title and timestamp still sort the same way
+#: every time). 600 characters of text are plenty for a 180-character preview once whitespace
+#: collapses, and keep a large corpus from shipping every chunk's full text.
+_CHUNK_VECTORS_SQL = text(
+    """
+    SELECT c.id, c.document_id, d.title AS document_title, c.chunk_index, c.page_number,
+           c.page_map, left(c.raw_content, 600) AS raw_head,
+           CAST(c.embedding AS text) AS embedding
+    FROM document_chunks AS c
+    JOIN documents AS d ON d.id = c.document_id
+    ORDER BY d.created_at ASC, d.title ASC, d.id ASC, c.chunk_index ASC
+    LIMIT CAST(:limit_n AS integer)
     """
 )
 
@@ -253,6 +271,33 @@ class Database:
                 pages_count=int(row["pages_count"] or 0),
                 chunks_count=int(row["chunks_count"] or 0),
                 created_at=row["created_at"],
+            )
+            for row in rows
+        ]
+
+    async def chunk_vectors(self, *, limit: int) -> list[ChunkVector]:
+        """Every chunk's embedding and label in stable corpus order, at most ``limit`` rows.
+
+        One statement. pgvector's text form (``[0.1,0.2,...]``) is valid JSON, so the vectors
+        need no codec, as with the query vector going the other way.
+        """
+        # Imported here: hybrid_search imports this module.
+        from app.retrieval.hybrid_search import _decode_page_map
+
+        async with self.engine.connect() as conn:
+            result = await conn.execute(_CHUNK_VECTORS_SQL, {"limit_n": int(limit)})
+            rows = result.mappings().all()
+        return [
+            ChunkVector(
+                id=str(row["id"]),
+                document_id=str(row["document_id"]),
+                document_title=row["document_title"],
+                chunk_index=int(row["chunk_index"]),
+                page_number=page_for_offset(
+                    _decode_page_map(row["page_map"]), 0, int(row["page_number"])
+                ),
+                preview=preview_of(row["raw_head"]),
+                vector=json.loads(row["embedding"]),
             )
             for row in rows
         ]

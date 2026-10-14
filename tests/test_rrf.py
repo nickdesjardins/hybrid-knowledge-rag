@@ -103,6 +103,10 @@ def test_sql_cte_has_expected_structure() -> None:
     assert "COALESCE(1.0 / (CAST(:rrf_k AS double precision) + d.rank), 0.0)" in sql
     assert "COALESCE(1.0 / (CAST(:rrf_k AS double precision) + s.rank), 0.0)" in sql
     assert "ORDER BY f.rrf_score DESC" in sql
+    # No final LIMIT: the caller keeps the first limit_n rows as candidates and reports the rest
+    # as cut after fusion (the vector map shows that an arm did return them).
+    assert sql.rstrip().endswith("c.id ASC")
+    assert sql.count("LIMIT CAST(:limit_n AS integer)") == 2  # one per arm
     for name in (":query_vector", ":query_text", ":document_id", ":limit_n", ":rrf_k"):
         assert name in sql
 

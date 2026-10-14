@@ -37,6 +37,7 @@ from app.main import (
     create_app,
 )
 from app.retrieval.embedder import FastEmbedEmbedder
+from app.retrieval.hybrid_search import HybridResult
 from app.retrieval.reranker import FastEmbedReranker
 from app.schemas import DocumentSummary, QueryRequest, RetrievedChunk
 from app.textnorm import fold_compat, has_control_characters
@@ -411,8 +412,11 @@ async def test_listing_needs_the_key_outside_demo_mode(
 
 
 class _BrokenSearcher:
-    async def search(self, **_: object) -> list[RetrievedChunk]:
+    async def search_with_arms(self, **_: object) -> HybridResult:
         raise OperationalError("SELECT secret_column FROM t", {"p": "secret"}, Exception("down"))
+
+    async def search(self, **_: object) -> list[RetrievedChunk]:
+        return (await self.search_with_arms()).candidates
 
 
 async def test_database_failures_become_503_without_sql(

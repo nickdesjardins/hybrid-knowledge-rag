@@ -72,6 +72,86 @@ def test_recorded_runs_carry_what_the_walkthrough_explains(record: dict) -> None
             assert trace["quotes_verified"] == len(body["citations"]) >= 1
 
 
+MAP_RANKS = ("dense_rank", "sparse_rank", "fused_rank", "rerank_position")
+MAP_LABELS = ("document_title", "page_number", "preview")
+
+
+def test_recorded_runs_carry_a_consistent_vector_map(record: dict) -> None:
+    """The walkthrough draws these maps and prints their arithmetic: every claim must hold."""
+    from app.schemas import VectorMap
+
+    corpus_chunks = sum(document["chunks"] for document in record["documents"])
+    corpus_order = [document["title"] for document in record["documents"]]
+    for run in record["runs"]:
+        body = run["response"]
+        # The page's order: a map refreshed by --maps-only wins over one the response carried.
+        vmap = run.get("vector_map") or body.get("vector_map")
+        assert vmap, f"run {run['id']} has no vector map: run scripts/record_runs.py --maps-only"
+        VectorMap.model_validate(vmap)
+        trace = body["pipeline"]
+        points = vmap["points"]
+        by_id = {p["chunk_id"]: p for p in points}
+        assert vmap["corpus_chunks"] == len(points) == len(by_id) == corpus_chunks
+        dims = vmap["dimensions"]
+        assert dims == trace["embedding_dimensions"] == len(vmap["query"]["vector"])
+        assert all(len(vector) == dims for vector in vmap["vectors"].values())
+
+        # Stable corpus order: documents as listed, chunks in order within each.
+        order = [(corpus_order.index(p["document_title"]), p["chunk_index"]) for p in points]
+        assert order == sorted(order) and len(set(order)) == len(order)
+        assert all(p["page_number"] >= 1 and len(p["preview"]) <= 180 for p in points)
+        assert all(p["searched"] for p in points)  # no recorded question uses a filter
+
+        # The map's labels come from Database.chunk_vectors, the passages' from the search: the
+        # page shows both for the same chunk, so they must agree.
+        for passage in body["retrieved_passages"]:
+            point = by_id[passage["chunk_id"]]
+            assert [point[key] for key in MAP_RANKS] == [passage[key] for key in MAP_RANKS]
+            assert [point[key] for key in MAP_LABELS] == [passage[key] for key in MAP_LABELS]
+        sent = [p for p in points if p["rerank_position"] is not None]
+        assert {p["chunk_id"] for p in sent} == {p["chunk_id"] for p in body["retrieved_passages"]}
+        positions = sorted(p["rerank_position"] for p in sent)
+        assert positions == list(range(1, trace["passages_to_model"] + 1)), run["id"]
+
+        dense = sorted(
+            (p for p in points if p["dense_rank"] is not None), key=lambda p: p["dense_rank"]
+        )
+        similarities = [p["similarity"] for p in dense]
+        assert similarities == sorted(similarities, reverse=True), run["id"]
+        # found_by_* count the fused candidates; a chunk an arm returned that fusion cut (only
+        # possible when the fused list is full) carries arm ranks and no fused rank.
+        kept = [p for p in points if p["fused_rank"] is not None]
+        assert sum(p["dense_rank"] is not None for p in kept) == (
+            trace["found_by_both"] + trace["found_by_vector_only"]
+        )
+        assert sum(p["sparse_rank"] is not None for p in kept) == (
+            trace["found_by_both"] + trace["found_by_keyword_only"]
+        )
+        fused = sorted(p["fused_rank"] for p in kept)
+        assert fused == list(range(1, trace["candidates"] + 1))
+        returned = [p for p in points if (p["dense_rank"], p["sparse_rank"]) != (None, None)]
+        cut = [p for p in returned if p["fused_rank"] is None]
+        assert all(p in returned for p in kept)  # every candidate came from an arm
+        if cut:
+            assert trace["candidates"] == trace["candidate_limit"], run["id"]
+        if trace.get("union_size") is not None:
+            assert trace["union_size"] == len(kept) + len(cut), run["id"]
+
+        spotlight = set(vmap["vectors"])
+        assert {p["chunk_id"] for p in body["retrieved_passages"]} <= spotlight
+        assert {p["chunk_id"] for p in dense[:3]} <= spotlight
+        # The walkthrough multiplies these rounded numbers and adds them up on screen.
+        question = vmap["query"]["vector"]
+        for chunk_id, vector in vmap["vectors"].items():
+            dot = sum(a * b for a, b in zip(question, vector, strict=True))
+            lengths = sum(a * a for a in question) ** 0.5 * sum(b * b for b in vector) ** 0.5
+            assert dot / lengths == pytest.approx(by_id[chunk_id]["similarity"], abs=0.002)
+
+        variance = vmap["explained_variance"]
+        assert vmap["method"] == "pca" and len(variance) == 2
+        assert 1 > variance[0] >= variance[1] > 0
+
+
 def test_recorded_runs_show_an_answer_and_a_refusal(record: dict) -> None:
     statuses = {run["response"]["status"] for run in record["runs"]}
     assert "answered" in statuses
@@ -183,6 +263,14 @@ def test_pages_load_the_teaching_layer_before_their_own_script(page: Path, own_s
     assert "explain.css" in html
     scripts = [src.rsplit("/", 1)[-1] for src in re.findall(r'<script src="([^"]+)"', html)]
     assert scripts.index("explain.js") < scripts.index(own_script), scripts
+
+
+def test_project_page_hands_each_recorded_map_to_the_walkthrough() -> None:
+    # Recorded maps live next to the response (run.vector_map); without this hand-over the
+    # project page would silently draw no map at all.
+    assert "vectorMap: run.vector_map" in _read(SITE / "assets" / "site.js")
+    script = _read(PLAYGROUND / "assets" / "explain.js")
+    assert "context.vectorMap || r.vector_map" in script
 
 
 def test_code_links_point_to_files_that_exist() -> None:

@@ -1,7 +1,10 @@
 """Hybrid retrieval: pgvector cosine search + tsvector full-text search fused with RRF in one CTE.
 
 Why one statement: both retrievers run inside a single round-trip and a single snapshot, and the
-fusion happens in SQL, so the Python side only sees the top-``limit`` fused candidates.
+fusion happens in SQL. Each arm returns at most ``limit`` chunks, so the fused union holds at most
+``2 * limit``; the statement returns all of it in fusion order and the Python side keeps the first
+``limit`` as candidates. The rest are "cut after fusion": only their arm ranks are kept, so the
+vector map can show that an arm did return them.
 
 RRF(d) = sum over retrievers m of 1 / (k + rank_m(d)), k = 60 by default.
 """
@@ -14,13 +17,14 @@ import math
 import uuid
 from collections import defaultdict
 from collections.abc import Sequence
+from dataclasses import dataclass
 from typing import Protocol
 
 from sqlalchemy import text
 
 from app.config import Settings
 from app.database import Database, vector_literal
-from app.schemas import RetrievedChunk
+from app.schemas import CutChunk, RetrievedChunk
 
 logger = logging.getLogger(__name__)
 
@@ -84,6 +88,9 @@ HYBRID_SEARCH_SQL = text(
         FROM dense_search AS d
         FULL OUTER JOIN sparse_search AS s ON d.id = s.id
     )
+    -- No LIMIT here: each arm has its own, so the union is at most twice that many rows. The
+    -- caller keeps the first limit_n rows as candidates; the ORDER BY ends on the unique id, so
+    -- that cut is deterministic.
     SELECT c.id,
            c.document_id,
            doc.title AS document_title,
@@ -102,7 +109,6 @@ HYBRID_SEARCH_SQL = text(
              f.dense_rank ASC NULLS LAST,
              f.sparse_rank ASC NULLS LAST,
              c.id ASC
-    LIMIT CAST(:limit_n AS integer)
     """
 )
 
@@ -162,7 +168,31 @@ def _decode_page_map(value: object) -> list[tuple[int, int]] | None:
         return None
 
 
+@dataclass(frozen=True, slots=True)
+class HybridResult:
+    """One hybrid search: the fused candidates, and the chunks fusion cut below the limit."""
+
+    #: The best ``limit`` chunks in fusion (RRF) order: what re-ranking sees.
+    candidates: list[RetrievedChunk]
+    #: Every other chunk an arm returned, in fusion order, with its arm ranks only.
+    cut: list[CutChunk]
+
+    @property
+    def union_size(self) -> int:
+        """Distinct chunks the two arms returned together."""
+        return len(self.candidates) + len(self.cut)
+
+
 class HybridSearcher(Protocol):
+    async def search_with_arms(
+        self,
+        *,
+        query_text: str,
+        query_vector: Sequence[float],
+        document_id: str | None = None,
+        limit: int | None = None,
+    ) -> HybridResult: ...
+
     async def search(
         self,
         *,
@@ -188,6 +218,20 @@ class PostgresHybridSearcher:
         document_id: str | None = None,
         limit: int | None = None,
     ) -> list[RetrievedChunk]:
+        """The fused candidates only (see :meth:`search_with_arms`)."""
+        result = await self.search_with_arms(
+            query_text=query_text, query_vector=query_vector, document_id=document_id, limit=limit
+        )
+        return result.candidates
+
+    async def search_with_arms(
+        self,
+        *,
+        query_text: str,
+        query_vector: Sequence[float],
+        document_id: str | None = None,
+        limit: int | None = None,
+    ) -> HybridResult:
         limit_n = int(limit or self.settings.top_k_retrieval)
         params = {
             "query_vector": vector_literal(query_vector),
@@ -209,6 +253,15 @@ class PostgresHybridSearcher:
                 result = await session.execute(HYBRID_SEARCH_SQL, params)
                 rows = result.mappings().all()
 
+        cut = [
+            CutChunk(
+                id=str(row["id"]),
+                rrf_score=float(row["rrf_score"]),
+                dense_rank=int(row["dense_rank"]) if row["dense_rank"] is not None else None,
+                sparse_rank=int(row["sparse_rank"]) if row["sparse_rank"] is not None else None,
+            )
+            for row in rows[limit_n:]
+        ]
         chunks = [
             RetrievedChunk(
                 id=str(row["id"]),
@@ -223,12 +276,13 @@ class PostgresHybridSearcher:
                 dense_rank=int(row["dense_rank"]) if row["dense_rank"] is not None else None,
                 sparse_rank=int(row["sparse_rank"]) if row["sparse_rank"] is not None else None,
             )
-            for row in rows
+            for row in rows[:limit_n]
         ]
         logger.debug(
-            "Hybrid search returned %d candidates (dense hits=%d, sparse hits=%d)",
+            "Hybrid search returned %d candidates (dense hits=%d, sparse hits=%d), %d cut",
             len(chunks),
             sum(1 for c in chunks if c.dense_rank is not None),
             sum(1 for c in chunks if c.sparse_rank is not None),
+            len(cut),
         )
-        return chunks
+        return HybridResult(candidates=chunks, cut=cut)

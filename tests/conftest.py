@@ -33,12 +33,14 @@ from app.generator.grounded_llm import (  # noqa: E402
     LLMCitation,
     LLMGroundedOutput,
 )
+from app.ingestion.chunker import page_for_offset  # noqa: E402
 from app.ingestion.contextualizer import HeuristicContextualizer  # noqa: E402
 from app.ingestion.pdf_parser import ParsedDocument, parse_pdf_bytes  # noqa: E402
 from app.main import Components, create_app  # noqa: E402
 from app.retrieval.embedder import HashingEmbedder  # noqa: E402
-from app.retrieval.hybrid_search import reciprocal_rank_fusion  # noqa: E402
-from app.schemas import DocumentSummary, RerankedChunk, RetrievedChunk  # noqa: E402
+from app.retrieval.hybrid_search import HybridResult, reciprocal_rank_fusion  # noqa: E402
+from app.retrieval.vector_map import ChunkVector, VectorMapper, preview_of  # noqa: E402
+from app.schemas import CutChunk, DocumentSummary, RerankedChunk, RetrievedChunk  # noqa: E402
 
 EMBEDDING_DIMS = 256
 
@@ -121,6 +123,7 @@ class InMemoryStore:
         self.chunks: list[dict[str, object]] = []
         self.search_calls: list[str | None] = []
         self.page_counts: dict[str, int | None] = {}
+        self.vector_reads: list[int] = []  # the limit of each chunk_vectors call
 
     async def ping(self) -> bool:
         return self.healthy
@@ -171,6 +174,27 @@ class InMemoryStore:
             )
         return document_id
 
+    async def chunk_vectors(self, *, limit: int) -> list[ChunkVector]:
+        """Every chunk in corpus order (documents as stored, then chunk_index), like the SQL."""
+        self.vector_reads.append(limit)
+        position = {document_id: i for i, document_id in enumerate(self.documents)}
+        ordered = sorted(
+            self.chunks,
+            key=lambda c: (position[str(c["document_id"])], c["chunk_index"]),  # type: ignore[index]
+        )
+        return [
+            ChunkVector(
+                id=str(c["id"]),
+                document_id=str(c["document_id"]),
+                document_title=str(c["document_title"]),
+                chunk_index=int(c["chunk_index"]),  # type: ignore[call-overload]
+                page_number=page_for_offset(c["page_map"], 0, int(c["page_number"])),  # type: ignore[arg-type, call-overload]
+                preview=preview_of(str(c["raw_content"])),
+                vector=list(c["embedding"]),  # type: ignore[call-overload]
+            )
+            for c in ordered[:limit]
+        ]
+
     async def search(
         self,
         *,
@@ -179,6 +203,21 @@ class InMemoryStore:
         document_id: str | None = None,
         limit: int | None = None,
     ) -> list[RetrievedChunk]:
+        result = await self.search_with_arms(
+            query_text=query_text, query_vector=query_vector, document_id=document_id, limit=limit
+        )
+        return result.candidates
+
+    async def search_with_arms(
+        self,
+        *,
+        query_text: str,
+        query_vector: Sequence[float],
+        document_id: str | None = None,
+        limit: int | None = None,
+    ) -> HybridResult:
+        """Like the SQL: each arm keeps ``limit``, fusion ranks the union, the first ``limit``
+        become candidates and the rest are cut (arm ranks only)."""
         self.search_calls.append(document_id)
         limit = limit or 50
         pool = [c for c in self.chunks if document_id is None or c["document_id"] == document_id]
@@ -199,12 +238,19 @@ class InMemoryStore:
         dense_rank = {c["id"]: i for i, c in enumerate(dense, start=1)}
         sparse_rank = {c["id"]: i for i, c in enumerate(sparse, start=1)}
         fused = reciprocal_rank_fusion(
-            [[str(c["id"]) for c in dense], [str(c["id"]) for c in sparse]],
-            k=self.rrf_k,
-            limit=limit,
+            [[str(c["id"]) for c in dense], [str(c["id"]) for c in sparse]], k=self.rrf_k
         )
         by_id = {c["id"]: c for c in pool}
-        return [
+        cut = [
+            CutChunk(
+                id=str(cid),
+                rrf_score=score,
+                dense_rank=dense_rank.get(cid),
+                sparse_rank=sparse_rank.get(cid),
+            )
+            for cid, score in fused[limit:]
+        ]
+        candidates = [
             RetrievedChunk(
                 id=str(cid),
                 document_id=str(by_id[cid]["document_id"]),
@@ -218,8 +264,9 @@ class InMemoryStore:
                 dense_rank=dense_rank.get(cid),
                 sparse_rank=sparse_rank.get(cid),
             )
-            for cid, score in fused
+            for cid, score in fused[:limit]
         ]
+        return HybridResult(candidates=candidates, cut=cut)
 
 
 class FakeReranker:
@@ -352,6 +399,7 @@ def components(
         contextualizer=HeuristicContextualizer(),
         generator=generator,
         budget=None,
+        vector_map=VectorMapper(store, settings),
     )
 
 

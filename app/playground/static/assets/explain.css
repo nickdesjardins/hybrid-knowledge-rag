@@ -1,12 +1,20 @@
 /* Teaching layer shared by the project page and the playground (identical copies; see explain.js).
    Relies on the theme tokens both pages define: --panel, --ink, --muted, --line, --accent,
-   --chip, --code, --ok, --warn. */
+   --chip, --code, --ok, --warn.
+   Vector map colours were checked with a palette validator (all pairs, both themes). Dark
+   document 4 is only legal because shape is a second channel: never drop the shapes. */
 :root {
   --xp-embed: #7a5cc2;
   --xp-search: #1f5f8b;
   --xp-rerank: #1d7a46;
   --xp-generate: #b7791f;
   --xp-answer-bg: rgba(29, 122, 70, 0.09);
+  --xp-doc1: #2a78d6;
+  --xp-doc2: #eb6834;
+  --xp-doc3: #1baf7a;
+  --xp-doc4: #4a3aa7;
+  --xp-pos: #2a78d6;
+  --xp-neg: #e34948;
 }
 :root[data-theme="dark"] {
   --xp-embed: #b39ae6;
@@ -14,6 +22,12 @@
   --xp-rerank: #58c389;
   --xp-generate: #e3b341;
   --xp-answer-bg: rgba(88, 195, 137, 0.12);
+  --xp-doc1: #3987e5;
+  --xp-doc2: #d95926;
+  --xp-doc3: #199e70;
+  --xp-doc4: #9b2dd2;
+  --xp-pos: #3987e5;
+  --xp-neg: #e66767;
 }
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) {
@@ -22,6 +36,12 @@
     --xp-rerank: #58c389;
     --xp-generate: #e3b341;
     --xp-answer-bg: rgba(88, 195, 137, 0.12);
+    --xp-doc1: #3987e5;
+    --xp-doc2: #d95926;
+    --xp-doc3: #199e70;
+    --xp-doc4: #9b2dd2;
+    --xp-pos: #3987e5;
+    --xp-neg: #e66767;
   }
 }
 
@@ -86,3 +106,154 @@
 .xp-controls input[type="range"] { flex: 1 1 220px; accent-color: var(--accent); }
 .xp-check { display: inline-flex; align-items: center; gap: 4px; font-size: 0.92rem; cursor: pointer; }
 .xp-lab tr.xp-answer td { background: var(--xp-answer-bg); }
+
+/* vector map: where the question landed */
+/* a size container: the map and its card are laid out by the width the section has, which differs
+   between the project page and the playground */
+.xp-vmap { margin: 4px 0 16px; padding: 14px 16px 12px; border: 1px solid var(--line); border-radius: 12px; font-size: 0.94rem; min-width: 0; container-type: inline-size; }
+.xp-vm-title { font-size: 1rem; margin: 0 0 4px; color: var(--ink); }
+.xp-vmap .xp-lede { margin-bottom: 10px; }
+.xp-vm-controls { display: flex; flex-wrap: wrap; gap: 8px 20px; margin: 0 0 10px; }
+.xp-segctl { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; min-width: 0; }
+.xp-segctl__label { font-size: 0.84rem; color: var(--muted); }
+.xp-segctl__opts { display: inline-flex; flex-wrap: wrap; gap: 2px; padding: 2px; border: 1px solid var(--line); border-radius: 9px; background: var(--chip); max-width: 100%; }
+.xp-segctl label { position: relative; display: inline-flex; }
+.xp-segctl input { position: absolute; opacity: 0; width: 1px; height: 1px; margin: 0; pointer-events: none; }
+.xp-segctl label span { padding: 4px 10px; border-radius: 7px; font-size: 0.85rem; color: var(--ink); cursor: pointer; }
+.xp-segctl label:hover span { color: var(--accent); }
+.xp-segctl input:checked + span { background: var(--accent); color: var(--accent-ink); }
+.xp-segctl input:focus-visible + span { outline: 2px solid var(--accent); outline-offset: 1px; }
+
+/* One column: map, card, then legend and caption, so the card of a tapped dot is right under the
+   map. The card moves beside the map only where the map keeps about 580 px or more. */
+.xp-vm-stage { display: grid; grid-template-columns: minmax(0, 1fr); gap: 12px 18px; align-items: start; }
+@container (min-width: 860px) {
+  .xp-vm-stage { grid-template-columns: minmax(0, 1fr) 260px; }
+  .xp-vm-figure { grid-column: 1; grid-row: 1; }
+  .xp-vm-keys { grid-column: 1; grid-row: 2; }
+  .xp-vm-side { grid-column: 2; grid-row: 1 / span 2; }
+}
+.xp-vm-figure { margin: 0; min-width: 0; }
+.xp-vm-keys { min-width: 0; }
+.xp-vm-mapcap { margin: 6px 0 0; color: var(--muted); font-size: 0.86rem; }
+.xp-vm-svg { display: block; width: 100%; height: auto; border-radius: 8px; }
+.xp-vm-svg:focus { outline: none; }
+.xp-vm-svg:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.xp-vm-svg.is-pointing { cursor: pointer; }
+.xp-vm-svg text, .xp-vm-bump text { font-size: 11px; }
+
+/* document identity: colour (currentColor) and shape, never colour alone */
+.xp-vm-doc1 { color: var(--xp-doc1); }
+.xp-vm-doc2 { color: var(--xp-doc2); }
+.xp-vm-doc3 { color: var(--xp-doc3); }
+.xp-vm-doc4 { color: var(--xp-doc4); }
+.xp-vm-doc5 { color: var(--muted); }
+.xp-vm-shape { fill: currentColor; stroke: var(--panel); stroke-width: 4px; paint-order: stroke; stroke-linejoin: round; }
+.xp-vm-shape--flat { stroke: none; }
+/* paint-order normal: the whole outline shows (with paint-order stroke the fill would hide half of it) */
+.is-hollow .xp-vm-shape { fill: var(--panel); stroke: currentColor; stroke-width: 1.75px; paint-order: normal; }
+.is-faint { opacity: 0.5; }
+.xp-vm-sent { fill: none; stroke: var(--ink); stroke-width: 1.25px; stroke-dasharray: 2.5 2.5; }
+.xp-vm-quoted { fill: none; stroke: var(--ok); stroke-width: 2px; }
+.xp-vm-halo { fill: none; stroke: var(--ink); stroke-width: 1.5px; opacity: 0; }
+.is-hover .xp-vm-halo { opacity: 0.45; }
+.is-selected .xp-vm-halo { opacity: 1; }
+.xp-vm-star { fill: var(--ink); stroke: var(--panel); stroke-width: 4px; paint-order: stroke; stroke-linejoin: round; }
+.xp-vm-key .xp-vm-star { stroke: none; }
+.xp-vm-badge { fill: var(--ink); stroke: var(--panel); stroke-width: 3px; paint-order: stroke; stroke-linejoin: round; font-weight: 700; font-variant-numeric: tabular-nums; }
+.xp-vm-svg .xp-vm-badge { font-size: 10.5px; }
+.xp-vm-doclabel { fill: var(--muted); stroke: var(--panel); stroke-width: 3px; paint-order: stroke; stroke-linejoin: round; font-weight: 650; letter-spacing: 0.02em; }
+.xp-vm-cap { fill: var(--muted); }
+.xp-vm-ringlabel { fill: var(--muted); stroke: var(--panel); stroke-width: 3px; paint-order: stroke; font-variant-numeric: tabular-nums; }
+.xp-vm-svg .xp-vm-ringlabel { font-size: 10px; }
+.xp-vm-axis, .xp-vm-ring, .xp-vm-gridline { fill: none; stroke: var(--line); stroke-width: 1px; }
+.xp-vm-link { stroke: var(--muted); stroke-width: 1px; opacity: 0.8; }
+.xp-vm-leader { stroke: var(--muted); stroke-width: 1px; }
+.xp-vm-move { transition: transform 0.6s cubic-bezier(0.2, 0.7, 0.2, 1); }
+.xp-vm-svg.is-instant .xp-vm-move { transition: none; }
+.xp-vm-back { animation: xp-vm-fade 0.4s ease-out; }
+@keyframes xp-vm-fade { from { opacity: 0; } }
+@media (prefers-reduced-motion: reduce) {
+  .xp-vm-move { transition: none; }
+  .xp-vm-back { animation: none; }
+}
+
+.xp-vmap .xp-vm-legend { list-style: none; margin: 0; padding: 0; display: flex; flex-wrap: wrap; gap: 4px 14px; font-size: 0.84rem; color: var(--muted); }
+.xp-vmap .xp-vm-legend li { margin: 0; display: inline-flex; align-items: center; gap: 6px; }
+.xp-vm-key { flex: none; overflow: visible; }
+
+.xp-vm-side { min-width: 0; position: relative; }
+/* read by screen readers, not shown */
+.xp-sr { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0; }
+.xp-vm-card { border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; font-size: 0.9rem; }
+.xp-vm-card p { margin: 0 0 4px; }
+.xp-vm-card p:last-child { margin-bottom: 0; }
+.xp-vm-card__doc { display: flex; align-items: flex-start; gap: 6px; overflow-wrap: anywhere; }
+.xp-vm-card__doc .xp-vm-key { margin-top: 3px; }
+.xp-vm-card__where { color: var(--muted); }
+.xp-vm-card__sim { font-weight: 650; font-variant-numeric: tabular-nums; }
+.xp-vm-card__ranks, .xp-vm-card__score { font-variant-numeric: tabular-nums; }
+.xp-vm-card__flag { display: flex; align-items: center; gap: 6px; font-weight: 600; }
+.xp-vm-hint { color: var(--muted); font-size: 0.82rem; margin: 6px 0 0; }
+@media (hover: none) and (pointer: coarse) { .xp-vm-hint__keys { display: none; } }
+.xp-vm-lesson { color: var(--ink); max-width: 80ch; }
+.xp-vm-how { margin-top: 6px; }
+.xp-vm-how summary { cursor: pointer; color: var(--accent); font-size: 0.9rem; }
+.xp-vm-howbody { max-width: 80ch; }
+.xp-vm-howbody p { margin: 8px 0; }
+
+/* the three parts below the map */
+.xp-vm-part { margin-top: 12px; border-top: 1px solid var(--line); padding-top: 8px; min-width: 0; }
+.xp-vm-part > summary { cursor: pointer; font-weight: 650; color: var(--ink); padding: 4px 0; }
+.xp-vm-part > summary:focus-visible, .xp-vm-how summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 6px; }
+.xp-vm-part > p { margin: 8px 0; }
+.xp-vm-bumpbox { margin-top: 6px; }
+.xp-vm-bump { display: block; max-width: 100%; height: auto; }
+.xp-vm-head { fill: var(--ink); font-weight: 650; }
+.xp-vm-bump .xp-vm-sub, .xp-vm-bump .xp-vm-rank { fill: var(--muted); font-size: 10.5px; font-variant-numeric: tabular-nums; }
+.xp-vm-bl { opacity: 0.4; }
+.xp-vm-bl.is-quoted, .xp-vm-bfocus .xp-vm-bl { opacity: 1; }
+.xp-vm-bpath { fill: none; stroke: currentColor; stroke-width: 1.5px; stroke-linejoin: round; stroke-linecap: round; }
+.is-quoted .xp-vm-bpath, .xp-vm-bfocus .xp-vm-bpath { stroke-width: 3px; }
+.xp-vm-bfocus { pointer-events: none; }
+.xp-vm-endlabel { fill: var(--ink); font-weight: 650; }
+.xp-vm-bhit { fill: none; stroke: transparent; stroke-width: 14px; stroke-linejoin: round; pointer-events: stroke; cursor: pointer; }
+
+.xp-vm-divkey { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 14px; font-size: 0.84rem; color: var(--muted); }
+.xp-vm-divkey > span { display: inline-flex; align-items: center; gap: 6px; }
+.xp-vm-sw { width: 10px; height: 10px; border-radius: 2px; flex: none; }
+.xp-vm-sw.is-pos { background: var(--xp-pos); }
+.xp-vm-sw.is-neg { background: var(--xp-neg); }
+.xp-vm-chips { display: flex; flex-wrap: wrap; gap: 6px; margin: 10px 0; }
+.xp-vm-chip { position: relative; display: inline-flex; }
+.xp-vm-chip input { position: absolute; opacity: 0; width: 1px; height: 1px; margin: 0; pointer-events: none; }
+.xp-vm-chip span { display: inline-flex; align-items: center; gap: 6px; border: 1px solid var(--line); background: var(--chip); color: var(--ink); border-radius: 999px; padding: 4px 11px 4px 8px; font-size: 0.84rem; cursor: pointer; }
+.xp-vm-chip input:checked + span { border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); font-weight: 650; }
+.xp-vm-chip input:focus-visible + span { outline: 2px solid var(--accent); outline-offset: 2px; }
+.xp-vm-grids { display: grid; grid-template-columns: minmax(0, 1fr); gap: 12px 16px; margin: 8px 0 4px; }
+@media (min-width: 720px) { .xp-vm-grids { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
+.xp-vm-grid { margin: 0; min-width: 0; }
+.xp-vm-grid figcaption { font-size: 0.86rem; font-weight: 650; color: var(--ink); margin-bottom: 4px; overflow-wrap: anywhere; }
+.xp-vm-scale { display: block; font-weight: 400; color: var(--muted); font-size: 0.8rem; font-variant-numeric: tabular-nums; }
+.xp-vm-heat { display: block; width: 100%; max-width: 360px; height: auto; cursor: crosshair; }
+.xp-vm-cellbg { fill: var(--chip); }
+.xp-vm-cell.is-pos { fill: var(--xp-pos); }
+.xp-vm-cell.is-neg { fill: var(--xp-neg); }
+.xp-vm-cellhi { fill: none; stroke: var(--ink); stroke-width: 0.14px; display: none; }
+.xp-vm-cellhi.is-on { display: inline; }
+.xp-vm-readout { min-height: 1.5em; margin: 4px 0; font-size: 0.88rem; font-variant-numeric: tabular-nums; }
+.xp-vm-sums p { margin: 8px 0; max-width: 80ch; }
+
+.xp-vm-table th button { background: none; border: 0; padding: 0; font: inherit; color: inherit; cursor: pointer; }
+.xp-vm-table th button:focus-visible, .xp-vm-pick:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 4px; }
+.xp-vm-table th[aria-sort] { color: var(--ink); }
+.xp-vm-table th[aria-sort="ascending"] button::after { content: " \2191"; }
+.xp-vm-table th[aria-sort="descending"] button::after { content: " \2193"; }
+.xp-vm-table td.num { min-width: 0; white-space: nowrap; }
+.xp-vm-pick { background: none; border: 0; padding: 0; font: inherit; color: var(--accent); cursor: pointer; text-align: left; display: inline-flex; align-items: center; gap: 6px; }
+.xp-vm-pick:hover { text-decoration: underline; }
+.xp-vm-table tr.is-selected td { background: var(--chip); }
+.xp-vm-tag { display: block; color: var(--muted); font-size: 0.8rem; margin-top: 2px; }
+@media (max-width: 600px) {
+  .xp-vmap { padding: 12px 10px 10px; }
+}

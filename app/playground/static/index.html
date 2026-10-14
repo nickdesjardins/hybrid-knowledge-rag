@@ -49,7 +49,7 @@
       answer only by quoting the text. Every quote is checked against the stored document before
       you see it, and if the documents do not say it, the engine says so.
     </p>
-    <p class="lede"><strong>Learning how it works?</strong> Under each answer, the walkthrough explains every stage with the numbers from your own question, and links to the code that does it.</p>
+    <p class="lede"><strong>Learning how it works?</strong> Under each answer, the walkthrough explains every stage with the numbers from your own question, and links to the code that does it. A map shows where your question landed among the stored chunks, and why the nearest one is not always the passage that answers.</p>
     <p class="stack">FastAPI · PostgreSQL + pgvector (HNSW) + tsvector (GIN) · RRF · cross-encoder re-ranking · constrained JSON</p>
   </section>
 
@@ -101,7 +101,7 @@
       <li><strong>Hybrid retrieval.</strong> One SQL statement runs a pgvector cosine search (HNSW index) and a PostgreSQL full-text search (GIN index) and fuses both with Reciprocal Rank Fusion, keeping the top <span data-fill="top_k_retrieval">50</span> chunks. Keyword search catches identifiers such as <code>21 CFR Part 11</code> that embeddings blur.</li>
       <li><strong>Re-rank.</strong> A cross-encoder (<span data-fill="reranker">a small ONNX model</span>) reads the question and each candidate together and keeps the best <span data-fill="top_k_rerank">3</span>.</li>
       <li><strong>Generate.</strong> A language model answers under a strict JSON schema: an answer, a confidence score, and quotes copied character for character from the passages, or an explicit "insufficient context".</li>
-      <li><strong>Verify.</strong> The server looks for every quote in the stored chunk, takes the page number from the database, and drops anything that does not match. An answer whose quotes all fail is withheld.</li>
+      <li><strong>Verify.</strong> The server looks for every quote in the stored chunk, takes the page number from the database, and drops anything that does not match. An answer that claims to be grounded but has no quote that passes is withheld.</li>
     </ol>
     <p class="muted">Before any of this, at ingestion, each chunk is stored with a situational preamble (document title, section, pages), following Anthropic's Contextual Retrieval pattern, so a sentence such as "the limit is 10 ppm" stays findable on its own.</p>
     <details class="xp-prompt" id="rules" hidden>

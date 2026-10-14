@@ -60,8 +60,10 @@ from app.ingestion.pipeline import EmptyDocumentError, ingest_pdf
 from app.retrieval.embedder import Embedder, build_embedder, local_inference_gate
 from app.retrieval.hybrid_search import HybridSearcher, PostgresHybridSearcher
 from app.retrieval.reranker import Reranker, build_reranker
+from app.retrieval.vector_map import VectorMapper
 from app.schemas import (
     AnswerStatus,
+    CutChunk,
     DocumentsResponse,
     DocumentSummary,
     GroundedAnswer,
@@ -71,9 +73,11 @@ from app.schemas import (
     PlaygroundConfig,
     ProviderStatus,
     QueryRequest,
+    RerankedChunk,
     RetrievedChunk,
     RetrievedPassage,
     StageTimings,
+    VectorMap,
 )
 
 logger = logging.getLogger(__name__)
@@ -151,6 +155,7 @@ class Components:
     contextualizer: Contextualizer
     generator: GroundedGenerator | None
     budget: QueryBudget | None = None
+    vector_map: VectorMapper | None = None
     inflight: int = 0
 
     async def close(self) -> None:
@@ -234,6 +239,7 @@ async def build_components(settings: Settings) -> Components:
         contextualizer=contextualizer,
         generator=generator,
         budget=budget,
+        vector_map=VectorMapper(db, settings) if settings.vector_map_enabled else None,
     )
 
 
@@ -682,12 +688,13 @@ async def _answer(payload: QueryRequest, components: Components, started: float)
         query_vector = await components.embedder.embed_query(payload.query)
         embed_ms = lap(mark)
         mark = time.perf_counter()
-        candidates = await components.searcher.search(
+        hybrid = await components.searcher.search_with_arms(
             query_text=payload.query,
             query_vector=query_vector,
             document_id=payload.filter_document_id,
             limit=settings.top_k_retrieval,
         )
+        candidates = hybrid.candidates
         search_ms = lap(mark)
         mark = time.perf_counter()
         reranked = (
@@ -702,11 +709,20 @@ async def _answer(payload: QueryRequest, components: Components, started: float)
         raise _database_http_error(exc) from exc
 
     retrieval_ms = (time.perf_counter() - started) * 1000.0
+    vector_map, map_ms = await _build_vector_map(
+        components,
+        query_vector=query_vector,
+        candidates=candidates,
+        cut=hybrid.cut,
+        reranked=reranked,
+        document_id=payload.filter_document_id,
+    )
     trace = _pipeline_trace(
         components,
         candidates,
         reranked,
-        StageTimings(embed_ms=embed_ms, search_ms=search_ms, rerank_ms=rerank_ms),
+        StageTimings(embed_ms=embed_ms, search_ms=search_ms, rerank_ms=rerank_ms, map_ms=map_ms),
+        union_size=hybrid.union_size,
     )
 
     if not reranked:
@@ -725,6 +741,7 @@ async def _answer(payload: QueryRequest, components: Components, started: float)
             status=AnswerStatus.INSUFFICIENT_CONTEXT,
             generation_model=None,
             pipeline=trace,
+            vector_map=vector_map,
         )
 
     if components.generator is None:
@@ -750,7 +767,12 @@ async def _answer(payload: QueryRequest, components: Components, started: float)
     trace.timings.generate_ms = lap(mark)
     trace.quotes_proposed = len(result.output.citations)
     trace.quotes_verified = len(answer.citations)
+    # ground_answer's own rule: a grounded claim whose quotes all fail verification is withheld.
+    trace.draft_withheld = (
+        not result.refused and bool(result.output.is_grounded) and not answer.is_grounded
+    )
     answer.pipeline = trace
+    answer.vector_map = vector_map
 
     fused_rank = {chunk.id: position for position, chunk in enumerate(candidates, start=1)}
     cited_ids = {citation.chunk_id for citation in answer.citations}
@@ -783,6 +805,37 @@ async def _answer(payload: QueryRequest, components: Components, started: float)
     return answer
 
 
+async def _build_vector_map(
+    components: Components,
+    *,
+    query_vector: Sequence[float],
+    candidates: Sequence[RetrievedChunk],
+    cut: Sequence[CutChunk],
+    reranked: Sequence[RerankedChunk],
+    document_id: str | None,
+) -> tuple[VectorMap | None, float | None]:
+    """The map of this answer and the milliseconds it took (both None when it is switched off).
+
+    A teaching aid, never a reason to fail: whatever goes wrong, the answer goes out without it.
+    """
+    mapper = components.vector_map
+    if mapper is None or not components.settings.vector_map_enabled:
+        return None, None
+    mark = time.perf_counter()
+    try:
+        vector_map = await mapper.build(
+            query_vector=query_vector,
+            candidates=candidates,
+            cut=cut,
+            reranked=reranked,
+            document_id=document_id,
+        )
+    except Exception as exc:  # noqa: BLE001 - the answer must not depend on its illustration
+        logger.warning("Vector map skipped: %s", type(exc).__name__)
+        vector_map = None
+    return vector_map, round((time.perf_counter() - mark) * 1000.0, 2)
+
+
 def _model_names(components: Components) -> tuple[str, str]:
     embedder = components.embedder
     reranker = components.reranker
@@ -797,8 +850,14 @@ def _pipeline_trace(
     candidates: Sequence[RetrievedChunk],
     reranked: Sequence[RetrievedChunk],
     timings: StageTimings,
+    *,
+    union_size: int,
 ) -> PipelineTrace:
-    """Counts the playground walkthrough explains: what each search arm contributed."""
+    """Counts the playground walkthrough explains: what each search arm contributed.
+
+    ``found_by_*`` count the fused candidates; ``union_size`` also counts the chunks an arm
+    returned that fusion ranked below ``candidate_limit``.
+    """
     settings = components.settings
     both = sum(1 for c in candidates if c.dense_rank is not None and c.sparse_rank is not None)
     vector_only = sum(1 for c in candidates if c.dense_rank is not None and c.sparse_rank is None)
@@ -811,6 +870,7 @@ def _pipeline_trace(
         rrf_k=settings.rrf_k,
         candidate_limit=settings.top_k_retrieval,
         candidates=len(candidates),
+        union_size=union_size,
         found_by_both=both,
         found_by_vector_only=vector_only,
         found_by_keyword_only=keyword_only,

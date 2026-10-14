@@ -163,6 +163,7 @@ async def test_query_returns_grounded_answer_with_verified_citation(
     assert len(generator.calls) == 1
     assert len(generator.calls[0][1]) <= 3
     assert reranker.calls[0][2] == 3
+    assert body["pipeline"]["draft_withheld"] is False
 
 
 async def test_query_lexical_identifier_is_found_via_sparse_arm(
@@ -215,6 +216,7 @@ async def test_query_with_no_documents_short_circuits_before_generation(
     assert body["citations"] == []
     assert body["confidence_score"] == 0.0
     assert generator.calls == []
+    assert body["vector_map"] is None  # nothing stored, nothing to map
 
 
 async def test_query_hallucinated_quote_is_rejected(
@@ -230,6 +232,8 @@ async def test_query_hallucinated_quote_is_rejected(
     assert body["citations"] == []
     assert body["confidence_score"] == 0.0
     assert "could not be anchored to verbatim quotations" in body["answer"]
+    # The walkthrough words this case from the server's own verdict, not from a guess.
+    assert body["pipeline"]["draft_withheld"] is True
 
 
 async def test_query_model_reports_insufficient_context(
@@ -243,6 +247,7 @@ async def test_query_model_reports_insufficient_context(
     assert body["is_grounded"] is False
     assert body["answer"] == "The passages do not state this."
     assert body["citations"] == []
+    assert body["pipeline"]["draft_withheld"] is False  # the model said so; nothing was withheld
 
 
 async def test_query_refusal_status(
@@ -255,6 +260,7 @@ async def test_query_refusal_status(
     assert body["status"] == "refused"
     assert body["is_grounded"] is False
     assert body["citations"] == []
+    assert body["pipeline"]["draft_withheld"] is False
 
 
 async def test_query_provider_outage_maps_to_503_and_fatal_to_502(
@@ -640,3 +646,185 @@ async def test_playground_config_exposes_models_and_rules(client: AsyncClient) -
     assert body["system_prompt"] == SYSTEM_PROMPT
     assert body["models"]["embedding"] and body["models"]["embedding_dimensions"] > 0
     assert body["models"]["reranker"]
+
+
+# ------------------------------------------------------------------------- vector map
+
+MAP_RANKS = ("dense_rank", "sparse_rank", "fused_rank", "rerank_position")
+MAP_LABELS = ("document_title", "page_number", "preview")
+
+
+async def test_answer_carries_a_vector_map_consistent_with_the_trace(
+    client: AsyncClient, sample_pdf_bytes: bytes, store: InMemoryStore
+) -> None:
+    from app.retrieval.embedder import HashingEmbedder
+
+    from .conftest import EMBEDDING_DIMS, _cosine
+
+    await _ingest(client, sample_pdf_bytes, "sop.pdf")
+    question = "How long must batch records be retained?"
+    response = await client.post("/api/v1/query", json={"query": question})
+    assert response.status_code == 200
+    body = response.json()
+    vmap, trace = body["vector_map"], body["pipeline"]
+    assert vmap["method"] == "pca"
+    assert vmap["dimensions"] == trace["embedding_dimensions"] == EMBEDDING_DIMS
+    assert vmap["corpus_chunks"] == len(vmap["points"]) == len(store.chunks)
+    assert [p["chunk_id"] for p in vmap["points"]] == [c["id"] for c in store.chunks]
+    assert trace["timings"]["map_ms"] >= 0
+
+    points = {p["chunk_id"]: p for p in vmap["points"]}
+    for passage in body["retrieved_passages"]:
+        point = points[passage["chunk_id"]]
+        assert [point[key] for key in MAP_RANKS] == [passage[key] for key in MAP_RANKS]
+        assert [point[key] for key in MAP_LABELS] == [passage[key] for key in MAP_LABELS]
+        assert passage["chunk_id"] in vmap["vectors"]
+    sent = {p["chunk_id"] for p in vmap["points"] if p["rerank_position"] is not None}
+    assert sent == {p["chunk_id"] for p in body["retrieved_passages"]}
+    fused = sorted(p["fused_rank"] for p in vmap["points"] if p["fused_rank"] is not None)
+    assert fused == list(range(1, trace["candidates"] + 1))
+    assert trace["union_size"] == trace["candidates"]  # 50 per arm: fusion cut nothing
+
+    query_vector = await HashingEmbedder(EMBEDDING_DIMS).embed_query(question)
+    assert vmap["query"]["vector"] == [round(v, 4) for v in query_vector]
+    for chunk in store.chunks:
+        expected = _cosine(query_vector, chunk["embedding"])  # type: ignore[arg-type]
+        assert points[chunk["id"]]["similarity"] == pytest.approx(expected, abs=1e-4)
+    by_dense = sorted(
+        (p for p in vmap["points"] if p["dense_rank"] is not None), key=lambda p: p["dense_rank"]
+    )
+    similarities = [p["similarity"] for p in by_dense]
+    assert similarities == sorted(similarities, reverse=True)  # the vector arm ranks by it
+    assert all(p["searched"] for p in vmap["points"])
+
+
+async def test_chunks_cut_after_fusion_keep_their_arm_ranks_on_the_map(
+    settings,
+    client: AsyncClient,
+    sample_pdf_bytes: bytes,
+    second_pdf_bytes: bytes,
+    store: InMemoryStore,
+    reranker,
+) -> None:
+    """Each arm returns TOP_K_RETRIEVAL chunks and fusion keeps that many of their union (the
+    live demo runs with 10). A chunk an arm returned that fusion then cut keeps its arm rank on
+    the map, with no fused rank; only a chunk with no arm rank was returned by neither arm."""
+    from app.retrieval.embedder import HashingEmbedder
+
+    from .conftest import EMBEDDING_DIMS, _cosine
+
+    settings.top_k_retrieval = settings.top_k_rerank = 2
+    await _ingest(client, sample_pdf_bytes, "sop.pdf")
+    await _ingest(client, second_pdf_bytes, "travel-policy.pdf")
+    question = "How long must batch records be retained?"
+    query_vector = await HashingEmbedder(EMBEDDING_DIMS).embed_query(question)
+    searched = await store.search_with_arms(query_text=question, query_vector=query_vector, limit=2)
+    assert searched.cut, "this question must make fusion cut a chunk an arm returned"
+
+    body = (await client.post("/api/v1/query", json={"query": question})).json()
+    trace, points = body["pipeline"], {p["chunk_id"]: p for p in body["vector_map"]["points"]}
+    assert trace["candidate_limit"] == trace["candidates"] == 2
+    assert trace["union_size"] == 2 + len(searched.cut) < len(store.chunks)
+
+    # Retrieval is unchanged: re-ranking saw the first 2 of the fused order, nothing more.
+    assert reranker.calls[-1][1] == 2
+    kept = [c.id for c in searched.candidates]
+    assert {p["chunk_id"] for p in body["retrieved_passages"]} <= set(kept)
+    by_fused = sorted(
+        (p for p in points.values() if p["fused_rank"] is not None), key=lambda p: p["fused_rank"]
+    )
+    assert [p["chunk_id"] for p in by_fused] == kept
+    for chunk in searched.cut:
+        point = points[chunk.id]
+        assert (point["dense_rank"], point["sparse_rank"]) == (chunk.dense_rank, chunk.sparse_rank)
+        assert (point["fused_rank"], point["rerank_position"]) == (None, None)
+
+    returned = [p for p in points.values() if (p["dense_rank"], p["sparse_rank"]) != (None, None)]
+    assert len(returned) == trace["union_size"]
+    # A null vector rank means the vector arm really did not return it (its top 2 by cosine).
+    nearest = sorted(
+        store.chunks,
+        key=lambda c: (-_cosine(query_vector, c["embedding"]), c["id"]),  # type: ignore[arg-type]
+    )[:2]
+    dense = {chunk_id for chunk_id, p in points.items() if p["dense_rank"] is not None}
+    assert dense == {c["id"] for c in nearest}
+
+
+async def test_ingesting_a_document_refits_the_map(
+    client: AsyncClient, sample_pdf_bytes: bytes, second_pdf_bytes: bytes, store: InMemoryStore
+) -> None:
+    sop = await _ingest(client, sample_pdf_bytes, "sop-qa-017.pdf")
+    question = {"query": "batch record retention", "filter_document_id": sop["document_id"]}
+    first = (await client.post("/api/v1/query", json=question)).json()["vector_map"]
+    await client.post("/api/v1/query", json=question)
+    assert len(store.vector_reads) == 1  # the projection is cached between questions
+
+    await _ingest(client, second_pdf_bytes, "travel-policy.pdf")
+    # Every candidate is still a SOP chunk (the filter), so only the ingestion's invalidation
+    # can explain a fresh read here.
+    after = (await client.post("/api/v1/query", json=question)).json()["vector_map"]
+    assert len(store.vector_reads) == 2
+    assert len(first["points"]) < len(after["points"]) == len(store.chunks)
+    searched = {p["document_title"]: p["searched"] for p in after["points"]}
+    assert searched == {"sop qa 017": True, "travel policy": False}
+
+
+async def test_a_filter_that_matches_nothing_still_maps_the_corpus(
+    client: AsyncClient, sample_pdf_bytes: bytes, store: InMemoryStore
+) -> None:
+    await _ingest(client, sample_pdf_bytes, "sop.pdf")
+    response = await client.post(
+        "/api/v1/query",
+        json={"query": "batch record retention", "filter_document_id": str(uuid.UUID(int=0))},
+    )
+    body = response.json()
+    assert body["status"] == "insufficient_context" and body["retrieved_passages"] == []
+    vmap = body["vector_map"]
+    assert len(vmap["points"]) == len(store.chunks)
+    assert not any(p["searched"] for p in vmap["points"])
+    assert all(p[key] is None for p in vmap["points"] for key in MAP_RANKS)
+    assert vmap["vectors"] == {}
+
+
+async def test_a_failing_vector_map_never_fails_the_answer(
+    settings, components: Components, sample_pdf_bytes: bytes, caplog: pytest.LogCaptureFixture
+) -> None:
+    from httpx import ASGITransport
+
+    class BrokenMapper:
+        async def build(self, **kwargs: object) -> None:
+            raise RuntimeError("chunk text that must not reach the log")
+
+        def invalidate(self) -> None:
+            pass
+
+    components.vector_map = BrokenMapper()  # type: ignore[assignment]
+    app = create_app(settings=settings, components=components)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as http:
+        await _ingest(http, sample_pdf_bytes, "sop.pdf")
+        response = await http.post("/api/v1/query", json={"query": "batch record retention"})
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "answered" and body["vector_map"] is None
+    assert body["pipeline"]["timings"]["map_ms"] >= 0
+    assert "Vector map skipped: RuntimeError" in caplog.text
+    assert "must not reach the log" not in caplog.text
+
+
+@pytest.mark.parametrize("how", ["setting", "no mapper"])
+async def test_vector_map_can_be_switched_off(
+    settings, components: Components, sample_pdf_bytes: bytes, store: InMemoryStore, how: str
+) -> None:
+    from httpx import ASGITransport
+
+    if how == "setting":
+        settings.vector_map_enabled = False
+    else:
+        components.vector_map = None
+    app = create_app(settings=settings, components=components)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as http:
+        await _ingest(http, sample_pdf_bytes, "sop.pdf")
+        body = (await http.post("/api/v1/query", json={"query": "batch record retention"})).json()
+    assert body["status"] == "answered"
+    assert body["vector_map"] is None and body["pipeline"]["timings"]["map_ms"] is None
+    assert store.vector_reads == []

@@ -59,7 +59,7 @@
           is then checked against the stored document, and the page number comes from the
           database, not from the model. When the documents do not say it, the answer says so.
         </p>
-        <p class="lede"><strong>Built to be read.</strong> Each recorded answer below opens into a step-by-step walkthrough with its own numbers, the rank-fusion lab lets you try the core formula, and every concept links to the code that implements it.</p>
+        <p class="lede"><strong>Built to be read.</strong> Each recorded answer below opens into a step-by-step walkthrough with its own numbers, including a map of where the question landed among the stored chunks and how the four rankings disagreed about them. The rank-fusion lab lets you try the core formula, and every concept links to the code that implements it.</p>
         <p class="stackline">FastAPI · PostgreSQL · pgvector (HNSW) · tsvector (GIN) · Reciprocal Rank Fusion · cross-encoder re-ranking · strict JSON schema</p>
       </div>
       <div class="demo" id="demo" aria-label="Live demo">
@@ -103,7 +103,7 @@
       <li><span class="flow__n">2</span><h3>Search two ways at once</h3><p>One SQL statement runs a pgvector cosine search over an HNSW index and a PostgreSQL full-text search over a GIN index, then fuses both lists with Reciprocal Rank Fusion.</p><p class="flow__code"><a href="https://github.com/nickdesjardins/hybrid-knowledge-rag/blob/main/app/retrieval/hybrid_search.py">retrieval/hybrid_search.py</a></p></li>
       <li><span class="flow__n">3</span><h3>Re-rank</h3><p>A cross-encoder reads the question and each candidate together and keeps the three best. This is what lifts the right clause above look-alikes.</p><p class="flow__code"><a href="https://github.com/nickdesjardins/hybrid-knowledge-rag/blob/main/app/retrieval/reranker.py">retrieval/reranker.py</a></p></li>
       <li><span class="flow__n">4</span><h3>Answer under a schema</h3><p>The model must return JSON: an answer, a confidence score, and quotes copied character for character, or an explicit “insufficient context”.</p><p class="flow__code"><a href="https://github.com/nickdesjardins/hybrid-knowledge-rag/blob/main/app/generator/grounded_llm.py">generator/grounded_llm.py</a></p></li>
-      <li><span class="flow__n">5</span><h3>Verify</h3><p>The server looks for every quote in the stored chunk and drops what does not match. Titles and page numbers are filled from the database. An answer with no surviving quote is withheld.</p><p class="flow__code"><a href="https://github.com/nickdesjardins/hybrid-knowledge-rag/blob/main/app/generator/grounded_llm.py">generator/grounded_llm.py</a></p></li>
+      <li><span class="flow__n">5</span><h3>Verify</h3><p>The server looks for every quote in the stored chunk and drops what does not match. Titles and page numbers are filled from the database. An answer that claims grounding but has no surviving quote is withheld.</p><p class="flow__code"><a href="https://github.com/nickdesjardins/hybrid-knowledge-rag/blob/main/app/generator/grounded_llm.py">generator/grounded_llm.py</a></p></li>
     </ol>
     <details class="xp-prompt" id="rules" hidden>
       <summary>Read the rules the language model answers under</summary>

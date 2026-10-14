@@ -82,7 +82,10 @@
     var walk = el("section", "xp");
     walk.setAttribute("aria-label", "Walk through this answer");
     card.appendChild(walk);
-    if (explain) explain.walkthrough(walk, body, { systemPrompt: systemPrompt });
+    // The recorded response is kept exactly as the service returned it. A vector map replayed
+    // afterwards from the same database (scripts/record_runs.py --maps-only) travels beside it, and
+    // the walkthrough prefers it as the newer one; otherwise the response's own map is drawn.
+    if (explain) explain.walkthrough(walk, body, { systemPrompt: systemPrompt, vectorMap: run.vector_map });
   }
 
   function showRecord(record) {

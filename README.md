@@ -145,8 +145,8 @@ rrf_fusion AS (
 )
 SELECT c.*, doc.title, f.rrf_score, f.dense_rank, f.sparse_rank
 FROM rrf_fusion f JOIN document_chunks c ON c.id = f.id JOIN documents doc ON doc.id = c.document_id
-ORDER BY f.rrf_score DESC, f.dense_rank NULLS LAST, f.sparse_rank NULLS LAST, c.id
-LIMIT 50;
+ORDER BY f.rrf_score DESC, f.dense_rank NULLS LAST, f.sparse_rank NULLS LAST, c.id;
+-- no LIMIT: the union holds at most 2 x 50 rows, and Python keeps the first 50 as candidates
 ```
 
 Implementation notes:
@@ -168,6 +168,12 @@ Implementation notes:
   even though names repeat.
 - `reciprocal_rank_fusion()` is a pure-Python twin of the CTE used by the unit tests and the
   in-memory test double; the live-database test asserts the two agree to 1e-9.
+- Each arm returns up to `TOP_K_RETRIEVAL` chunks, so their union can hold up to twice that, and
+  fusion keeps the best `TOP_K_RETRIEVAL` of it as candidates. The statement returns the whole
+  union in fusion order; `search_with_arms()` keeps the first `TOP_K_RETRIEVAL` rows as candidates
+  (the only rows re-ranking ever sees) and only the arm ranks of the rest, the chunks *cut after
+  fusion*, so the vector map can show that an arm did return them. `pipeline.union_size` counts
+  both.
 
 ### 3. Cross-encoder re-ranking (`app/retrieval/reranker.py`)
 
@@ -203,10 +209,11 @@ top_n=3)`. Returns the top 3 with relevance scores. `RERANK_PROVIDER=none` keeps
 - **Retrieval trace:** every answer also returns `retrieved_passages`: for each of the passages
   given to the model, its rank in the vector arm, its rank in the keyword arm (or none), the RRF
   score, its position in the fused list, the re-rank score, and whether a verified citation
-  quotes it. A `pipeline` object adds what each stage did: how many candidates each search arm
-  contributed, how many quotes the model proposed and how many survived verification, and the
-  milliseconds spent embedding, searching, re-ranking and generating. The playground turns both
-  into a step-by-step walkthrough of that answer.
+  quotes it. A `pipeline` object adds what each stage did: how many distinct chunks the two search
+  arms returned together (`union_size`), how many of them fusion kept as candidates and how many
+  of those each arm found, how many quotes the model proposed and how many survived verification,
+  and the milliseconds spent embedding, searching, re-ranking and generating. The playground turns
+  both into a step-by-step walkthrough of that answer, together with the vector map (section 5).
 
 #### A note on determinism and `temperature=0`
 
@@ -215,6 +222,54 @@ with HTTP 400, and the `anthropic` 1.x SDK no longer exposes the parameter. Dete
 instead by constrained JSON decoding, `effort="low"`, a prompt that forbids inference, and the
 server-side quote verification above. The OpenAI path (`LLM_PROVIDER=openai`) still sends
 `GENERATION_TEMPERATURE=0.0`.
+
+### 5. The vector map (`app/retrieval/vector_map.py`)
+
+Every answer also carries `vector_map`: all the stored chunks flattened to two dimensions, the
+question placed among them, and how each stage ranked each chunk. It is a teaching aid, not part
+of retrieval, and it exists to show one thing: the nearest vector is not always the passage that
+answers, which is why this engine never trusts the vector arm alone.
+
+- **Why PCA.** A principal component analysis finds the two directions in which the stored
+  chunks differ most, and places every chunk and the question along them. It is a rotation
+  followed by dropping axes, so it is deterministic (the same corpus always gives the same map,
+  and each axis is turned so that its largest loading is positive: the map never mirrors itself
+  between fits), and a new question never moves the chunks. Non-linear methods such as t-SNE or
+  UMAP draw tighter clusters, but their layout depends on a random start and their distances
+  cannot be read as distances. The PCA runs on the embeddings scaled to length 1, and the
+  question is scaled the same way: cosine similarity ignores length, so the map does too (most
+  embedding models, bge-small included, already return length-1 vectors).
+- **What it cannot show.** Two directions keep only part of the spread, returned as
+  `explained_variance` (on the sample corpus about 22 % and 19 % of it). A projection can only
+  shrink distances: two dots far apart on the map really point in different directions, but two
+  dots close together may be far apart in the dimensions the map drops. On the sample corpus the
+  "annual revenue" question lands near the deviation SOP on the map, while its nearest chunk in
+  384 dimensions belongs to the supplier SOP. Every point therefore also carries its exact cosine
+  similarity to the question (`similarity`, which is 1 minus pgvector's `<=>` distance), and the
+  walkthrough has a distance view drawn from those numbers alone.
+- **The field.** `vector_map.points` lists every chunk in corpus order with its position, its
+  similarity, whether the document filter searched it, and four ranks. `dense_rank` and
+  `sparse_rank` are its rank in the vector and the keyword arm (`null`: that arm did not return
+  it); `fused_rank` its position among the fused candidates (`null`: no arm returned it, or
+  fusion ranked it below the `TOP_K_RETRIEVAL` it keeps, in which case an arm rank is set);
+  `rerank_position` its place among the passages sent to the model. On the sample corpus (17
+  chunks) fusion cuts nothing at 50 per arm, as recorded; at `TOP_K_RETRIEVAL=10`, as on the live
+  demo, it cuts one to three chunks an arm returned on six of the seven recorded questions.
+  `vector_map.query` holds the question's position and embedding, and `vector_map.vectors` the
+  embeddings of the vector arm's top 3 and of the passages sent to the model, so the page can
+  multiply them out in front of you. Numbers are rounded to 4 decimals, and
+  `pipeline.timings.map_ms` says what the map cost. `vector_map` is `null` when the map is
+  switched off, when the corpus holds fewer than 3 chunks or more than `VECTOR_MAP_MAX_CHUNKS`,
+  when its chunks do not spread in two directions (all with the same embedding, or only two
+  distinct ones, e.g. one small file ingested twice), when a chunk the search returned is still
+  missing after a fresh read of the corpus (deleted meanwhile), or when building it failed: the
+  map never fails an answer.
+- **What it costs.** The projection depends only on the corpus, so it is fitted once (one
+  `SELECT` of the embeddings, one SVD in a worker thread) and kept for `VECTOR_MAP_TTL_S`.
+  Ingestion drops it, so the next question refits it (that answer's `map_ms` includes the read
+  and the SVD), and a question whose returned chunks are missing from it (another process
+  ingested meanwhile) refits it once. Per question, what remains is one matrix-vector product and
+  the response itself, which lists every chunk (hence the chunk limit).
 
 ---
 
@@ -412,7 +467,10 @@ points to a file that exists.
 
 **The project page** (`site/`) is published by GitHub Pages. It shows `site/recorded/runs.json`,
 which `scripts/record_runs.py` writes by driving the real application; nothing in it is edited
-by hand, and `tests/test_site.py` re-checks every recorded quote against the sample PDFs. Each
+by hand, and `tests/test_site.py` re-checks every recorded quote against the sample PDFs. The
+vector maps of those runs come from `record_runs.py --maps-only`, which replays retrieval for each
+recorded question (no language model, nothing written to the database) and writes nothing unless
+the replay finds exactly the recorded passages. Each
 recorded run opens into the same walkthrough as the playground, so the page teaches even while
 the live demo sleeps.
 
@@ -559,6 +617,7 @@ All settings live in `app/config.py` and are read from the environment or `.env`
 | `TRUST_PROXY_HEADERS` / `CLIENT_IP_HEADER` / `TRUSTED_PROXY_HOPS` | `false` / unset / `1` | Where the visitor address comes from behind a proxy (see Public showcase) |
 | `LOCAL_INFERENCE_CONCURRENCY` | `1` | Local model calls at once (embedding and re-ranking share it) |
 | `DOCUMENTS_CACHE_TTL_S` | `300` | Corpus listing cache, so page views do not wake the database |
+| `VECTOR_MAP_ENABLED` / `VECTOR_MAP_MAX_CHUNKS` / `VECTOR_MAP_TTL_S` | `true` / `1000` / `600` | The vector map in every answer; larger corpora get none; how long its projection is kept (ingestion drops it; the next question refits it) |
 
 ---
 
@@ -585,8 +644,15 @@ developer shell full of real keys or odd `LOG_LEVEL` values cannot change the ou
   header and via streamed body, too many pages/chunks), `/api/v1/query` (grounded answer, lexical
   identifier retrieval, document filter, empty corpus short-circuit, hallucinated-quote
   rejection, insufficient context, refusal, provider outage 502/503 with sanitised details,
-  validation 422, API-key auth), plus unit tests for quote anchoring (Unicode folds, ligatures,
-  combining accents), preamble exclusion and prompt-injection resistance.
+  validation 422, API-key auth, a vector map that agrees with the trace, keeps the arm ranks of
+  the chunks fusion cut, is refitted after an ingestion and never fails an answer), plus unit
+  tests for quote anchoring (Unicode folds, ligatures, combining accents), preamble exclusion and
+  prompt-injection resistance.
+- `tests/test_vector_map.py` - the PCA on data with known answers (directions, explained
+  variance, the sign convention, vector lengths that never move a dot, no map without spread in
+  two directions), the map of one question (cosine similarities, stage ranks including chunks cut
+  after fusion, spotlight vectors, the document filter, rounding) and the projection cache
+  (time-to-live, invalidation, one refit for an unknown chunk, corpora above the limit).
 - `tests/test_adapters.py` - the real `AnthropicGroundedGenerator`, `OpenAIGroundedGenerator`,
   `AnthropicContextualizer`, `CohereReranker` and `OpenAIEmbedder` driven by stub SDK clients:
   request shapes (no sampling parameters on Claude, structured-output schema, cache breakpoints,
@@ -606,13 +672,16 @@ developer shell full of real keys or odd `LOG_LEVEL` values cannot change the ou
   citation carries the page its quote is on.
 - `tests/test_site.py` - holds the published pages to their sources: every recorded quote is
   found verbatim in the sample PDF on the page it cites, the recorded stack matches the code,
+  every recorded vector map agrees with its run's trace and with the arithmetic the page shows,
   the pages load only their own scripts, and `render.yaml`, the `Dockerfile` and the settings
   agree with each other.
 
 Live PostgreSQL integration tests run only when `TEST_DATABASE_URL` is set. They create and drop
 their own schema (`rag_test`), verify the DDL and index definitions, assert that the SQL RRF scores
-*and order* equal the Python reference, exercise the document filter, check the dimension-drift
-guard, and confirm with `EXPLAIN` that the dense arm uses `idx_chunks_hnsw`:
+*and order* equal the Python reference (the chunks fusion cut included), exercise the document
+filter, check the dimension-drift guard, check that the vector map's read returns every chunk in
+corpus order with its stored embedding, begin page and preview (and similarities equal to
+pgvector's `1 - <=>`), and confirm with `EXPLAIN` that the dense arm uses `idx_chunks_hnsw`:
 
 ```bash
 TEST_DATABASE_URL=postgresql+asyncpg://rag:rag@localhost:5432/rag pytest tests/test_integration_db.py -v
@@ -697,7 +766,8 @@ hybrid-retrieval-engine/
 │   ├── retrieval/
 │   │   ├── embedder.py          # OpenAI / OpenRouter / fastembed (local) / hashing embedders
 │   │   ├── hybrid_search.py     # RRF CTE + pure-Python reference
-│   │   └── reranker.py          # Cohere Rerank v3.5 / fastembed cross-encoder / passthrough
+│   │   ├── reranker.py          # Cohere Rerank v3.5 / fastembed cross-encoder / passthrough
+│   │   └── vector_map.py        # PCA map of the corpus returned with every answer (teaching aid)
 │   ├── generator/
 │   │   └── grounded_llm.py      # constrained output + verbatim citation verification
 │   └── main.py                  # FastAPI routes, request guard middleware, auth, playground, CORS
@@ -713,7 +783,8 @@ hybrid-retrieval-engine/
 ├── scripts/
 │   ├── benchmark.py             # p50/p95/p99 latency against a running instance
 │   ├── make_demo_corpus.py      # writes the sample PDFs and their manifest
-│   ├── record_runs.py           # seeds the corpus and records the runs shown on the page
+│   ├── record_runs.py           # seeds the corpus and records the runs shown on the page;
+│   │                            # --maps-only adds their vector maps (no language model)
 │   ├── run_local_demo.py        # the showcase on your machine, in demo mode
 │   ├── openrouter_smoke.py      # live check of the free-model chain (1-2 free requests)
 │   └── run_live_db_tests.py     # live-DB tests on embedded PostgreSQL (pgserver)

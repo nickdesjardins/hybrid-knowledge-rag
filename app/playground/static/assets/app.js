@@ -39,6 +39,13 @@
     return node;
   }
   function ms(value) { return value === null || value === undefined ? "n/a" : Math.round(value) + " ms"; }
+  // Lists of numbers (the vector map's 384-number embeddings) on one line each, so the rest of
+  // the raw response stays readable. Only real line breaks are joined: a JSON string never holds one.
+  function rawJson(body) {
+    return JSON.stringify(body, null, 2).replace(/\[\n\s+(-?[\d.eE+-]+(?:,\n\s+-?[\d.eE+-]+)*)\n\s*\]/g, function (match, inner) {
+      return "[" + inner.replace(/,\n\s+/g, ", ") + "]";
+    });
+  }
   function fill(name, value) {
     if (value === null || value === undefined || value === "") return;
     Array.prototype.forEach.call(document.querySelectorAll('[data-fill="' + name + '"]'), function (node) {
@@ -138,8 +145,10 @@
       li.appendChild(el("blockquote", null, c.verbatim_quote));
       list.appendChild(li);
     });
+    // The API sends body.vector_map with the answer (null when the map is off or failed), and
+    // the walkthrough draws it from there: nothing else is needed for it.
     if (explain) explain.walkthrough($("walkthrough"), body, { systemPrompt: systemPrompt });
-    $("result-json").textContent = JSON.stringify(body, null, 2);
+    $("result-json").textContent = rawJson(body);
     result.scrollIntoView({ behavior: "smooth", block: "nearest" });
   }
 

@@ -420,6 +420,29 @@ class Settings(BaseSettings):
         description="pgvector >= 0.8 iterative scans keep filtered searches from returning too few rows.",
     )
 
+    # ------------------------------------------------------------------- vector map
+    vector_map_enabled: bool = Field(
+        default=True,
+        description=(
+            "Return vector_map with every answer: the corpus embeddings flattened to two "
+            "dimensions (PCA), where the question landed, and each stage's rank. A teaching aid."
+        ),
+    )
+    vector_map_max_chunks: int = Field(
+        default=1000,
+        ge=3,
+        le=20_000,
+        description="Larger corpora get no map: every answer would list every chunk.",
+    )
+    vector_map_ttl_s: float = Field(
+        default=600.0,
+        ge=0,
+        description=(
+            "Refit the map's projection at least this often; ingestion drops it, so the next "
+            "question refits it."
+        ),
+    )
+
     # --------------------------------------------------------------------- chunking
     chunk_size_tokens: int = Field(default=400, ge=50, le=4000)
     chunk_overlap_tokens: int = Field(default=60, ge=0, le=1000)
