@@ -323,6 +323,8 @@ def test_clean_block_text_undoes_hyphenation_but_keeps_hard_hyphens() -> None:
     assert clean_block_text("during 2023-\n2024 and COVID-\n19") == "during 2023-2024 and COVID-19"
     assert clean_block_text("re­\nquired  twice") == "required twice"
     assert clean_block_text("  multiple   spaces\tand\nlines ") == "multiple spaces and lines"
+    # Typographic ligatures from PDF fonts become plain letters (keyword search depends on it).
+    assert clean_block_text("deﬁnes the ﬂow") == "defines the flow"
 
 
 def test_pdf_parse_and_chunk_roundtrip(sample_pdf_bytes: bytes) -> None:

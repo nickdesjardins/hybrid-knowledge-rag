@@ -28,3 +28,4 @@ max-line-length = 112
 
 [tool.ruff.lint.per-file-ignores]
 "tests/*" = ["E501"]
+"scripts/make_demo_corpus.py" = ["E501"]  # prose paragraphs of the fictional SOPs

@@ -16,6 +16,7 @@ asyncpg>=0.30
 anthropic>=1.0,<2          # contextualizer worker + grounded generation (Claude)
 openai>=2.0,<4             # text-embedding-3-* embeddings (and optional generation)
 cohere>=5.13,<8            # Rerank v3.5 cross-encoder
+httpx2>=2.12,<3            # OpenRouter allowance check (app/budget.py); also used by the SDKs above
 
 # --- Ingestion -----------------------------------------------------------------
 pymupdf>=1.25

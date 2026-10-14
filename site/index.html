@@ -1,0 +1,185 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <!-- This page cannot send response headers, so its security policy is set here. Scripts and
+       styles come from this page's own files only. The one outside address is the live demo's
+       icon, which assets/site.js loads as a picture to learn that the demo is awake. -->
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' https://*.onrender.com; base-uri 'none'; form-action 'none'">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <meta name="referrer" content="no-referrer">
+  <meta name="format-detection" content="telephone=no">
+  <title>Compliance Retrieval Engine</title>
+  <meta name="description" content="A retrieval engine for SOPs and regulatory manuals: hybrid vector and keyword search in PostgreSQL, cross-encoder re-ranking, and answers that carry verified, page-level verbatim citations. Runs entirely on free models.">
+  <meta property="og:type" content="website">
+  <meta property="og:title" content="Compliance Retrieval Engine">
+  <meta property="og:description" content="Hybrid RAG with verified citations: pgvector + full-text search fused with RRF, re-ranked by a cross-encoder, answered by free models that may only quote the source.">
+  <link rel="icon" href="assets/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="assets/site.css">
+  <link rel="stylesheet" href="assets/explain.css">
+  <script src="assets/theme.js"></script>
+  <script src="assets/explain.js" defer></script>
+  <script src="assets/site.js" defer></script>
+</head>
+<body>
+<a class="skip" href="#runs">Skip to the recorded runs</a>
+
+<header class="topbar">
+  <div class="wrap topbar__row">
+    <a class="brand" href="./">
+      <svg class="brand__mark" viewBox="0 0 26 26" aria-hidden="true"><rect class="bg" width="26" height="26" rx="7"/><path class="ln" d="M8 8.5h10M8 12.5h10M8 16.5h6"/><circle class="dot" cx="18.5" cy="17" r="2.4"/></svg>
+      <span>Compliance Retrieval Engine</span>
+    </a>
+    <nav class="topbar__nav" aria-label="On this page">
+      <a href="#runs">Recorded runs</a>
+      <a href="#pipeline">Pipeline</a>
+      <a href="#lab">Rank fusion lab</a>
+      <a href="#concepts">Concepts</a>
+      <a href="#stack">Stack</a>
+    </nav>
+    <a class="chip-link" id="demo-chip" hidden><span class="dotmark" aria-hidden="true"></span>Live demo</a>
+    <button class="iconbtn" id="theme-toggle" type="button" aria-label="Switch between light and dark theme">
+      <svg class="icon theme-icon--light" viewBox="0 0 24 24" aria-hidden="true"><path d="M20 14.2A8 8 0 0 1 9.8 4a8 8 0 1 0 10.2 10.2z"/></svg>
+      <svg class="icon theme-icon--dark" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2.5v2.5M12 19v2.5M2.5 12H5M19 12h2.5M5.3 5.3l1.8 1.8M16.9 16.9l1.8 1.8M5.3 18.7l1.8-1.8M16.9 7.1l1.8-1.8"/></svg>
+    </button>
+  </div>
+</header>
+
+<main>
+  <section class="hero">
+    <div class="wrap hero__grid">
+      <div>
+        <p class="kicker">Applied AI · hybrid RAG · verified citations</p>
+        <h1>Questions about SOPs. <span>Answers you can audit.</span></h1>
+        <p class="lede">
+          This service answers questions over dense procedures and regulatory manuals. It finds
+          the governing passages with vector <em>and</em> keyword search, re-ranks them with a
+          cross-encoder, and lets a language model answer only by quoting the text. Every quote
+          is then checked against the stored document, and the page number comes from the
+          database, not from the model. When the documents do not say it, the answer says so.
+        </p>
+        <p class="lede"><strong>Built to be read.</strong> Each recorded answer below opens into a step-by-step walkthrough with its own numbers, the rank-fusion lab lets you try the core formula, and every concept links to the code that implements it.</p>
+        <p class="stackline">FastAPI · PostgreSQL · pgvector (HNSW) · tsvector (GIN) · Reciprocal Rank Fusion · cross-encoder re-ranking · strict JSON schema</p>
+      </div>
+      <div class="demo" id="demo" aria-label="Live demo">
+        <!-- THE ONE PLACE that holds the address of the live demo. Replace the host name that
+             ends in .invalid, once, with the name Render shows for the service (lower case,
+             ending in .onrender.com). Keep https:// before it and /#ask after it. Until then
+             the page says that the demo is not online yet, and asks nothing. -->
+        <a class="btn btn--primary btn--lg" id="demo-link" href="https://hybrid-retrieval-engine.invalid/#ask">Open the live demo</a>
+        <a class="btn btn--lg" href="https://github.com/nickdesjardins/hybrid-knowledge-rag">Code on GitHub</a>
+        <p class="demo__line" id="demo-words" role="status">The live demo runs on free hosting and sleeps between visits. Opening it wakes it, which takes about a minute.</p>
+        <p class="demo__cost">Runs at zero cost: free OpenRouter models for generation, local ONNX models for embeddings and re-ranking, serverless Postgres for storage.</p>
+      </div>
+    </div>
+  </section>
+
+  <section class="wrap section" id="runs" aria-labelledby="runs-title">
+    <div class="section__head">
+      <h2 id="runs-title">Recorded runs</h2>
+      <p class="muted" id="runs-meta">Real answers from the service, saved as it returned them.</p>
+    </div>
+    <div class="tabs" id="run-tabs" role="tablist" aria-label="Recorded questions"></div>
+    <article class="card run" id="run">
+      <p class="muted" id="run-fallback">The recorded runs need JavaScript to be shown. The raw file is <a href="recorded/runs.json">recorded/runs.json</a>.</p>
+    </article>
+    <ul class="tiles" id="tiles" hidden>
+      <li class="tile" id="tile-answered-box"><strong id="tile-answered">–</strong><span>answerable questions answered with verified citations</span></li>
+      <li class="tile" id="tile-refused-box"><strong id="tile-refused">–</strong><span>out-of-corpus questions correctly declined</span></li>
+      <li class="tile"><strong id="tile-retrieval">–</strong><span>median retrieval time (embed + SQL + re-rank)</span></li>
+      <li class="tile"><strong id="tile-total">–</strong><span>median end-to-end time on free models</span></li>
+    </ul>
+    <p class="footnote" id="runs-note" hidden>A handful of recorded questions shows that the pipeline works, not how often it is right. The questions were written with the corpus; the answers were not edited.</p>
+  </section>
+
+  <section class="wrap section" id="pipeline" aria-labelledby="pipeline-title">
+    <div class="section__head">
+      <h2 id="pipeline-title">How a question is answered</h2>
+    </div>
+    <p class="muted section__intro">Step 1 happens once per document, when it is ingested. Steps 2 to 5 happen for every question; the walkthrough under each recorded run above shows them with real numbers.</p>
+    <ol class="flow">
+      <li><span class="flow__n">1</span><h3>Ingest with context</h3><p>PDFs are split along headings and paragraphs with a sliding overlap. Each chunk gets a short situational preamble (document, section, pages) before it is embedded and indexed, so a line like “the limit is 10 ppm” stays findable on its own.</p><p class="flow__code"><a href="https://github.com/nickdesjardins/hybrid-knowledge-rag/blob/main/app/ingestion/pipeline.py">ingestion/pipeline.py</a></p></li>
+      <li><span class="flow__n">2</span><h3>Search two ways at once</h3><p>One SQL statement runs a pgvector cosine search over an HNSW index and a PostgreSQL full-text search over a GIN index, then fuses both lists with Reciprocal Rank Fusion.</p><p class="flow__code"><a href="https://github.com/nickdesjardins/hybrid-knowledge-rag/blob/main/app/retrieval/hybrid_search.py">retrieval/hybrid_search.py</a></p></li>
+      <li><span class="flow__n">3</span><h3>Re-rank</h3><p>A cross-encoder reads the question and each candidate together and keeps the three best. This is what lifts the right clause above look-alikes.</p><p class="flow__code"><a href="https://github.com/nickdesjardins/hybrid-knowledge-rag/blob/main/app/retrieval/reranker.py">retrieval/reranker.py</a></p></li>
+      <li><span class="flow__n">4</span><h3>Answer under a schema</h3><p>The model must return JSON: an answer, a confidence score, and quotes copied character for character, or an explicit “insufficient context”.</p><p class="flow__code"><a href="https://github.com/nickdesjardins/hybrid-knowledge-rag/blob/main/app/generator/grounded_llm.py">generator/grounded_llm.py</a></p></li>
+      <li><span class="flow__n">5</span><h3>Verify</h3><p>The server looks for every quote in the stored chunk and drops what does not match. Titles and page numbers are filled from the database. An answer with no surviving quote is withheld.</p><p class="flow__code"><a href="https://github.com/nickdesjardins/hybrid-knowledge-rag/blob/main/app/generator/grounded_llm.py">generator/grounded_llm.py</a></p></li>
+    </ol>
+    <details class="xp-prompt" id="rules" hidden>
+      <summary>Read the rules the language model answers under</summary>
+      <pre id="rules-text"></pre>
+    </details>
+  </section>
+
+  <section class="wrap section" id="why" aria-labelledby="why-title">
+    <div class="section__head">
+      <h2 id="why-title">Why plain vector search is not enough</h2>
+    </div>
+    <div class="cards">
+      <article class="card">
+        <h3>Context collapse</h3>
+        <p>A chunk cut out of a manual loses its document, its section and its subject. Embedding it that way makes two near-identical clauses from different SOPs indistinguishable. Prepending context before indexing fixes both retrievers at once.</p>
+      </article>
+      <article class="card">
+        <h3>Keyword blind spots</h3>
+        <p>Embeddings capture meaning and blur identifiers. Compliance questions are full of them: <code>21 CFR Part 11</code>, <code>ISO 2859-1</code>, <code>SOP-QA-017</code>. Full-text search catches the exact match; rank fusion merges the two lists without calibrating their scores.</p>
+      </article>
+      <article class="card">
+        <h3>Lost in the middle</h3>
+        <p>Handing a model fifty passages degrades its attention to the ones in the middle. Re-ranking down to three passages raises faithfulness and cuts the prompt to a fraction.</p>
+      </article>
+      <article class="card">
+        <h3>Ungrounded answers</h3>
+        <p>Even with the right passage, a model can misquote a number or cite a page it never saw. Here a quote that is not in the stored text is discarded, and the model never supplies a page number at all.</p>
+      </article>
+    </div>
+  </section>
+
+  <section class="wrap section" id="lab" aria-labelledby="lab-title">
+    <div class="section__head">
+      <h2 id="lab-title">Rank fusion lab</h2>
+    </div>
+    <div class="card" id="lab-body"><p class="muted">The lab needs JavaScript.</p></div>
+  </section>
+
+  <section class="wrap section" id="concepts" aria-labelledby="concepts-title">
+    <div class="section__head">
+      <h2 id="concepts-title">Concepts, one at a time</h2>
+      <p class="muted">Each idea in a few sentences, with the file that implements it.</p>
+    </div>
+    <div id="concepts-body"><p class="muted">The glossary needs JavaScript.</p></div>
+  </section>
+
+  <section class="wrap section" id="stack" aria-labelledby="stack-title">
+    <div class="section__head">
+      <h2 id="stack-title">What it runs on</h2>
+    </div>
+    <div class="tablewrap">
+      <table>
+        <thead><tr><th>Stage</th><th>This demo (free)</th><th>Drop-in alternative</th></tr></thead>
+        <tbody>
+          <tr><td>Generation</td><td id="stack-generator">An ordered chain of free OpenRouter models, with fallback when one fails</td><td>Claude via the Anthropic API, OpenAI</td></tr>
+          <tr><td>Embeddings</td><td id="stack-embeddings">Local ONNX model</td><td>OpenAI <code>text-embedding-3-small</code></td></tr>
+          <tr><td>Re-ranking</td><td id="stack-reranker">Local ONNX cross-encoder</td><td>Cohere Rerank v3.5</td></tr>
+          <tr><td>Storage and search</td><td id="stack-database">PostgreSQL with pgvector (HNSW, m=16, ef_construction=64) and tsvector (GIN)</td><td>Any PostgreSQL 16+ with pgvector</td></tr>
+          <tr><td>Hosting</td><td>Render free web service, Neon serverless Postgres, GitHub Pages</td><td>Any container host</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p class="muted">The public demo is deliberately closed in three ways: uploads need the operator's key, questions are rate limited per visitor and capped per day, and the corpus is a set of fictional quality documents written for it.</p>
+    <p class="links">
+      <a href="https://github.com/nickdesjardins/hybrid-knowledge-rag#readme">Read the README</a>
+      <a href="https://github.com/nickdesjardins/hybrid-knowledge-rag/blob/main/docs/DEPLOY.md">How it is deployed</a>
+      <a href="https://nickdesjardins.github.io/Invoice-Extraction-Service/">Phase 1: Invoice Extraction Service</a>
+    </p>
+  </section>
+</main>
+
+<footer class="foot">
+  <div class="wrap foot__row">
+    <span>Phase 2 of an Applied AI portfolio: embeddings, vector databases and hybrid RAG.</span>
+    <span id="foot-recorded"></span>
+  </div>
+</footer>
+</body>
+</html>

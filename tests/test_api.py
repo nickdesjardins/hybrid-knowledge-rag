@@ -548,7 +548,9 @@ def test_ground_answer_clamps_confidence_and_keeps_verified_subset() -> None:
 def test_user_prompt_separates_context_from_text() -> None:
     chunk = _chunk("c1", "The body text.", context="Doc X, section 2.")
     prompt = build_user_prompt("What?", [chunk], nonce="abcd")
-    assert '<passage-abcd chunk_id="c1" document_title="Doc" page_number="2" rank="1">' in prompt
+    # No page attribute: a chunk can span pages, and each citation carries its own page.
+    assert '<passage-abcd chunk_id="c1" document_title="Doc" rank="1">' in prompt
+    assert "page_number" not in prompt
     assert "<context-abcd>Doc X, section 2.</context-abcd>" in prompt
     assert "<text-abcd>The body text.</text-abcd>" in prompt
     assert prompt.rstrip().endswith("<question-abcd>What?</question-abcd>")
@@ -599,3 +601,42 @@ def test_verify_citations_never_accepts_quotes_from_the_context_preamble() -> No
     )
     assert dropped == 2
     assert [c.verbatim_quote for c in verified] == ["Body text here."]
+
+
+# ------------------------------------------------------------------ teaching trace
+
+
+async def test_answer_carries_a_consistent_pipeline_trace(
+    client: AsyncClient, sample_pdf_bytes: bytes
+) -> None:
+    """The playground walkthrough recomputes RRF from these fields, so they must agree."""
+    await _ingest(client, sample_pdf_bytes, "sop.pdf")
+    response = await client.post(
+        "/api/v1/query", json={"query": "How long must batch records be retained?"}
+    )
+    assert response.status_code == 200
+    body = response.json()
+    trace = body["pipeline"]
+    assert trace["candidates"] == (
+        trace["found_by_both"] + trace["found_by_vector_only"] + trace["found_by_keyword_only"]
+    )
+    assert trace["candidates"] <= trace["candidate_limit"]
+    assert trace["passages_to_model"] == len(body["retrieved_passages"])
+    assert trace["embedding_dimensions"] > 0 and trace["rrf_k"] == 60
+    assert all(value >= 0 for value in trace["timings"].values())
+    assert trace["quotes_proposed"] >= trace["quotes_verified"] == len(body["citations"])
+
+    k = trace["rrf_k"]
+    for passage in body["retrieved_passages"]:
+        ranks = [r for r in (passage["dense_rank"], passage["sparse_rank"]) if r is not None]
+        assert passage["rrf_score"] == pytest.approx(sum(1 / (k + r) for r in ranks), abs=1e-6)
+        assert 1 <= passage["fused_rank"] <= trace["candidates"]
+
+
+async def test_playground_config_exposes_models_and_rules(client: AsyncClient) -> None:
+    from app.generator.grounded_llm import SYSTEM_PROMPT
+
+    body = (await client.get("/playground/config")).json()
+    assert body["system_prompt"] == SYSTEM_PROMPT
+    assert body["models"]["embedding"] and body["models"]["embedding_dimensions"] > 0
+    assert body["models"]["reranker"]

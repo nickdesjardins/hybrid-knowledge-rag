@@ -26,7 +26,7 @@ from __future__ import annotations
 import re
 from collections import deque
 from collections.abc import Callable, Iterable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from app.ingestion.pdf_parser import ParsedDocument
 
@@ -81,6 +81,10 @@ class Chunk:
     token_count: int
     section: str | None = None
     overlap_text: str = ""  # prefix carried over from the previous chunk ("" for the first)
+    #: ``(character offset in text, page number)``: where each page begins inside this chunk.
+    #: A chunk can start on one page and continue on the next (or begin with overlap carried
+    #: from the previous page); the map lets a quote be attributed to the page it is really on.
+    page_map: list[tuple[int, int]] = field(default_factory=list)
 
     @property
     def body(self) -> str:
@@ -214,6 +218,77 @@ def explode_unit(
 # --------------------------------------------------------------------------- packing
 
 
+def page_for_offset(page_map: Sequence[Sequence[int]] | None, offset: int, default: int) -> int:
+    """The page on which character ``offset`` of a chunk's text lies."""
+    page = default
+    for start, number in page_map or ():
+        if start > offset:
+            break
+        page = number
+    return page
+
+
+_WORD_SPAN_RE = re.compile(r"\S+")
+
+
+def _tail_with_pages(
+    body: str,
+    body_map: Sequence[tuple[int, int]],
+    max_tokens: int,
+    counter: TokenCounter = count_tokens,
+) -> tuple[str, list[tuple[int, int]]]:
+    """``tail_words(body)`` plus the page map of that tail.
+
+    The overlap carried into the next chunk can begin on an earlier page than the unit it ends
+    in (a short last paragraph on page 3 after a long one on page 2), so its pages are tracked
+    word by word rather than taken from the last unit.
+    """
+    if max_tokens <= 0 or not body:
+        return "", []
+    words = [(match.start(), match.group()) for match in _WORD_SPAN_RE.finditer(body)]
+    selected: list[tuple[int, str]] = []
+    tokens = 0
+    for start, word in reversed(words):
+        word_tokens = counter(word)
+        if tokens + word_tokens > max_tokens:
+            break
+        selected.append((start, word))
+        tokens += word_tokens
+    selected.reverse()
+    default_page = body_map[0][1] if body_map else 1
+    tail_map: list[tuple[int, int]] = []
+    position = 0
+    for index, (start, word) in enumerate(selected):
+        if index:
+            position += 1  # the single space tail_words joins with
+        page = page_for_offset(body_map, start, default_page)
+        if not tail_map or tail_map[-1][1] != page:
+            tail_map.append((position, page))
+        position += len(word)
+    return " ".join(word for _, word in selected), tail_map
+
+
+def _build_page_map(
+    carry: str, carry_map: Sequence[tuple[int, int]], units: Sequence[TextUnit]
+) -> list[tuple[int, int]]:
+    """Offsets at which the page changes inside ``carry + joiner + joined units``."""
+    entries: list[tuple[int, int]] = []
+    position = 0
+    if carry:
+        entries.extend(carry_map or [(0, units[0].page_number)])
+        position = len(carry) + len(PARAGRAPH_JOINER)
+    for index, unit in enumerate(units):
+        if index > 0:
+            position += len(unit.joiner)
+        entries.append((position, unit.page_number))
+        position += len(unit.text)
+    compact: list[tuple[int, int]] = []
+    for start, number in entries:
+        if not compact or compact[-1][1] != number:
+            compact.append((start, number))
+    return compact
+
+
 def _join_units(units: Sequence[TextUnit]) -> str:
     if not units:
         return ""
@@ -249,36 +324,47 @@ def pack_units(
     chunks: list[Chunk] = []
     buffer: list[TextUnit] = []
     buffer_tokens = 0
-    buffer_page: int | None = None
     buffer_section: str | None = None
     current_section: str | None = None
     carry = ""  # overlap text carried from the previous chunk
     carry_tokens = 0
+    carry_map: list[tuple[int, int]] = []  # where each page begins inside the carry
     pending: deque[TextUnit] = deque(units)
 
     def flush() -> None:
-        nonlocal buffer, buffer_tokens, buffer_page, buffer_section, carry, carry_tokens
+        """Emit every unit in the buffer, in order, as one chunk or (after an overshoot) more."""
+        nonlocal buffer, buffer_tokens, buffer_section, carry, carry_tokens, carry_map
+        section = buffer_section
         while buffer:
-            body = _join_units(buffer)
-            text = f"{carry}{PARAGRAPH_JOINER}{body}" if carry else body
-            token_count = counter(text)
-            if token_count > chunk_size and len(buffer) > 1:
-                # A non-additive counter overshot at a seam: retry without the last unit.
-                pending.appendleft(buffer.pop())
-                continue
+            deferred: list[TextUnit] = []
+            while True:
+                body = _join_units(buffer)
+                text = f"{carry}{PARAGRAPH_JOINER}{body}" if carry else body
+                token_count = counter(text)
+                if token_count > chunk_size and len(buffer) > 1:
+                    # A non-additive counter overshot at a seam: the last unit opens the next
+                    # chunk. It stays ahead of the unit that triggered this flush, so the
+                    # document order is kept.
+                    deferred.insert(0, buffer.pop())
+                    continue
+                break
             chunks.append(
                 Chunk(
                     chunk_index=len(chunks),
-                    page_number=buffer_page or 1,
+                    page_number=buffer[0].page_number,
                     text=text,
                     token_count=token_count,
-                    section=buffer_section,
+                    section=section,
                     overlap_text=carry,
+                    page_map=_build_page_map(carry, carry_map, buffer),
                 )
             )
-            carry = tail_words(body, overlap, counter)
+            carry, carry_map = _tail_with_pages(
+                body, _build_page_map("", [], buffer), overlap, counter
+            )
             carry_tokens = counter(carry) if carry else 0
-            buffer, buffer_tokens, buffer_page, buffer_section = [], 0, None, None
+            buffer = deferred
+        buffer_tokens, buffer_section = 0, None
 
     while pending:
         unit = pending.popleft()
@@ -299,7 +385,7 @@ def pack_units(
                 # Indivisible (a single token wider than the budget): give it its own chunk
                 # rather than looping forever trying to split it.
                 flush()
-                buffer_page, buffer_section = unit.page_number, current_section
+                buffer_section = current_section
                 buffer, buffer_tokens = [unit], unit_tokens
                 flush()
                 continue
@@ -312,7 +398,6 @@ def pack_units(
             flush()
             cost = unit_tokens
         if not buffer:
-            buffer_page = unit.page_number
             buffer_section = current_section
         buffer.append(unit)
         buffer_tokens += cost

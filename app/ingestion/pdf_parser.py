@@ -15,9 +15,8 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import PurePath
 
-import pymupdf
-
 from app.errors import PDFParseError, PDFTooLargeError
+from app.textnorm import fold_compat
 
 _WHITESPACE_RE = re.compile(r"[ \t\r\f\v]+")
 # Only a lowercase-to-lowercase break is a hyphenation artefact ("valida-\ntion"). Hard hyphens
@@ -60,8 +59,14 @@ class ParsedDocument:
 
 
 def clean_block_text(raw: str) -> str:
-    """Normalise a block: undo hyphenation, keep hard hyphens, collapse whitespace."""
-    text = _SOFT_HYPHEN_RE.sub("", raw)
+    """Normalise a block: fold ligatures, undo hyphenation, keep hard hyphens, collapse whitespace.
+
+    Compatibility folding turns typographic ligatures such as "ﬁ" into plain letters, so
+    full-text search and keyword queries see "defines" rather than "deﬁnes". Superscripts,
+    subscripts and fractions are kept ("10³" must not become "103"); see ``app.textnorm``.
+    """
+    text = fold_compat(raw)
+    text = _SOFT_HYPHEN_RE.sub("", text)
     text = _SOFT_HYPHEN_BREAK_RE.sub(r"\1\2", text)
     text = _HARD_HYPHEN_BREAK_RE.sub("-", text)
     text = text.replace("\n", " ")
@@ -94,6 +99,10 @@ def parse_pdf_bytes(
     """
     if not data:
         raise PDFParseError("Empty upload")
+    # Imported here, not at module import: a deployed demo with a seeded corpus never parses a
+    # PDF, and PyMuPDF costs ~26 MB of resident memory just by being loaded.
+    import pymupdf
+
     try:
         document = pymupdf.open(stream=data, filetype="pdf")
     except Exception as exc:  # PyMuPDF raises a few different exception types

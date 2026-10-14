@@ -1,0 +1,90 @@
+# Render Blueprint: one free web service built from the Dockerfile, serving the API and the
+# playground at "/". Render reads this file when you choose New > Blueprint and pick the
+# repository; docs/DEPLOY.md walks through it. Two values are typed into a form, once:
+# OPENROUTER_API_KEY and DATABASE_URL (Neon's direct connection string).
+services:
+  - type: web
+    name: hybrid-retrieval-engine
+    runtime: docker
+    plan: free # without this line Render creates a paid instance
+    region: virginia # same coast as a Neon database in us-east-1; cannot be changed later
+    dockerfilePath: ./Dockerfile
+    # Liveness only. Render probes this path every few seconds; /health would query Neon on
+    # each probe and keep its compute awake around the clock, past the free monthly allowance.
+    healthCheckPath: /livez
+    autoDeployTrigger: commit # every push to main is built and deployed
+    buildFilter:
+      ignoredPaths: # a push that changes only these does not rebuild the service
+        - site/**
+        - docs/**
+        - README.md
+        - .github/**
+        - tests/**
+        - scripts/**
+    envVars:
+      - key: ENVIRONMENT
+        value: production # hides /docs
+      - key: DEMO_MODE
+        value: "true" # uploads closed, questions budgeted, corpus seeded from demo/
+      - key: LLM_PROVIDER
+        value: openrouter
+      - key: OPENROUTER_API_KEY
+        sync: false # asked for once, when the Blueprint is created; never stored here
+      - key: DATABASE_URL
+        sync: false # paste Neon's DATABASE_URL_UNPOOLED (the direct connection string)
+      - key: API_KEY
+        generateValue: true # the operator's upload key; read it in the Render dashboard
+      - key: EMBEDDING_PROVIDER
+        value: fastembed
+      - key: EMBEDDING_DIMENSIONS
+        value: "384"
+      - key: FASTEMBED_MODEL
+        value: BAAI/bge-small-en-v1.5 # baked into the image by the Dockerfile
+      - key: RERANK_PROVIDER
+        value: fastembed # set to "none" if the instance ever runs out of memory (saves ~100 MB)
+      - key: FASTEMBED_RERANK_MODEL
+        value: Xenova/ms-marco-MiniLM-L-6-v2 # baked into the image by the Dockerfile
+      # Memory: measured 390 MB steady / 441 MB peak with these settings; the instance has 512 MB.
+      - key: FASTEMBED_LOW_MEMORY
+        value: "true"
+      - key: FASTEMBED_THREADS
+        value: "1" # a free instance gets a fraction of one CPU
+      - key: FASTEMBED_RERANK_BATCH_SIZE
+        value: "2"
+      - key: LOCAL_INFERENCE_CONCURRENCY
+        value: "1" # one model call at a time: two would not fit in 512 MB together
+      # The cross-encoder is the slow step on a shared CPU: re-rank 10 fused candidates, not 50.
+      - key: TOP_K_RETRIEVAL
+        value: "10"
+      - key: CONTEXTUALIZER_PROVIDER
+        value: heuristic # the alternative costs one free model request per chunk
+      - key: CORS_ALLOW_ORIGINS
+        value: https://nickdesjardins.github.io # the project page on GitHub Pages
+      # Visitor addresses, for the per-visitor limits. Render's traffic passes through
+      # Cloudflare, which overwrites CF-Connecting-IP with the real address; without it the
+      # app falls back to the right-most X-Forwarded-For entry, which can only merge visitors.
+      - key: TRUST_PROXY_HEADERS
+        value: "true"
+      - key: CLIENT_IP_HEADER
+        value: CF-Connecting-IP
+      # Public question budget (OpenRouter allows 20 free requests a minute).
+      - key: QUERY_RATE_LIMIT_PER_MINUTE
+        value: "10"
+      - key: QUERY_DAILY_LIMIT_PER_CLIENT
+        value: "60"
+      - key: QUERY_GLOBAL_LIMIT_PER_MINUTE
+        value: "20"
+      - key: QUERY_DAILY_LIMIT
+        value: "800"
+      - key: QUERY_MAX_INFLIGHT
+        value: "4"
+      - key: DEMO_MAX_QUERY_CHARS
+        value: "500"
+      - key: DB_POOL_SIZE
+        value: "3" # Neon's free compute is small; the service runs one worker
+      - key: DB_MAX_OVERFLOW
+        value: "2"
+      - key: DB_STARTUP_RETRIES
+        value: "3" # Neon may take a few seconds to resume after suspending
+      - key: LOG_LEVEL
+        value: INFO

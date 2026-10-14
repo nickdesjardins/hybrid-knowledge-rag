@@ -5,6 +5,16 @@ technical documentation **without hallucinating**. Every answer is produced from
 every passage is cited with a verbatim quote and a page number, and the service says "insufficient
 context" instead of guessing.
 
+* **The project page:** <https://nickdesjardins.github.io/hybrid-knowledge-rag/> is the address to
+  give to people. It is a static page on GitHub Pages: it is there at once, shows seven recorded
+  runs with their retrieval traces, and wakes the live demo while it is read.
+* **The live demo** runs at zero cost: free OpenRouter models for generation, local ONNX models
+  for embeddings and re-ranking, Neon for PostgreSQL, Render for hosting. It is closed on purpose:
+  uploads need the operator's key, questions are rate limited and capped per day, and the corpus
+  is four fictional quality documents. See [Public showcase](#public-showcase).
+* **Putting it online:** [docs/DEPLOY.md](docs/DEPLOY.md) walks through it, and says exactly what
+  has and has not been verified.
+
 The pipeline is the one described in Anthropic's *Contextual Retrieval* work combined with
 PostgreSQL-native hybrid search:
 
@@ -78,7 +88,7 @@ status.
 |---|---|---|
 | Parse | `app/ingestion/pdf_parser.py` | PyMuPDF extracts text per page as layout blocks with bounding boxes. Hyphenated line breaks are joined, whitespace normalised. Encrypted or image-only PDFs are rejected with 400. Parsing runs in a worker thread. |
 | Chunk | `app/ingestion/chunker.py` | Blocks become units; markdown / numbered / ALL-CAPS headings are detected and recorded as the current section. Units are packed into chunks of `CHUNK_SIZE_TOKENS` with the last `CHUNK_OVERLAP_TOKENS` carried into the next chunk. Oversized paragraphs are recursively exploded into sentences, word windows, and finally token-boundary slices (URLs, dot leaders, CJK prose), always re-joined with the original separators so the stored text stays verbatim. Invariant: `token_count <= CHUNK_SIZE_TOKENS`. Each chunk records the page it starts on. Runs in a worker thread. |
-| Contextualize | `app/ingestion/contextualizer.py` | Claude Haiku 5.5 receives the whole document (prompt-cached with `cache_control`) plus the chunk and returns a short situational context. The first chunk is processed alone to create the cache entry, then the rest fan out under a semaphore; any failure, refusal, or truncation falls back to a deterministic heuristic preamble (title, section, page) so ingestion never fails because of the worker. Document text is wrapped in nonce-suffixed tags and declared untrusted in the system prompt. |
+| Contextualize | `app/ingestion/contextualizer.py` | Claude Haiku 5.5 receives the whole document (prompt-cached with `cache_control`) plus the chunk and returns a short situational context. The first chunk is processed alone to create the cache entry, then the rest fan out under a semaphore; any failure, refusal, or truncation falls back to a deterministic heuristic preamble (title, section, page) so ingestion never fails because of the worker. Document text is wrapped in nonce-suffixed tags and declared untrusted in the system prompt. `CONTEXTUALIZER_PROVIDER` switches this stage to the OpenRouter free chain or to the offline heuristic. |
 | Embed | `app/retrieval/embedder.py` | Batched `text-embedding-3-small` (1536 dims) by default; `fastembed` for local ONNX models; `hashing` for an offline, non-semantic demo mode. |
 | Store | `app/database.py` | One transaction inserts the `documents` row and all `document_chunks` rows. `tsv_content` is a `GENERATED ALWAYS AS (to_tsvector('english', contextualized_content)) STORED` column, so it can never drift from the text. |
 
@@ -87,15 +97,17 @@ Schema (created on startup, idempotent):
 ```sql
 CREATE EXTENSION IF NOT EXISTS vector;
 
-CREATE TABLE documents (id UUID PRIMARY KEY, title TEXT, filename TEXT, created_at TIMESTAMPTZ);
+CREATE TABLE documents (id UUID PRIMARY KEY, title TEXT, filename TEXT, page_count INTEGER,
+                        created_at TIMESTAMPTZ);
 
 CREATE TABLE document_chunks (
     id UUID PRIMARY KEY,
     document_id UUID REFERENCES documents(id) ON DELETE CASCADE,
-    chunk_index INTEGER, page_number INTEGER,
+    chunk_index INTEGER, page_number INTEGER,       -- the page the chunk starts on
     raw_content TEXT, contextualized_content TEXT,
     embedding vector(1536),
     tsv_content tsvector GENERATED ALWAYS AS (to_tsvector('english', contextualized_content)) STORED,
+    page_map JSONB,                                 -- [[offset, page], ...] inside raw_content
     UNIQUE (document_id, chunk_index)
 );
 
@@ -181,6 +193,18 @@ top_n=3)`. Returns the top 3 with relevance scores. `RERANK_PROVIDER=none` keeps
   normalisation (ligatures, combining accents, zero-width characters), then replaced by the exact
   source span. Unknown `chunk_id`s, overlong quotes and non-matching quotes are dropped;
   duplicates are collapsed; at most 10 citations.
+- **Exact page attribution:** a chunk can start on one page and continue on the next, or begin
+  with overlap carried from the previous page. Each chunk therefore stores a small page map
+  (`page_map`: the character offsets at which the page changes), and a citation reports the page
+  on which its quote *begins*, not the page its chunk starts on. The model never supplies a page
+  number at all.
+- **Retrieval trace:** every answer also returns `retrieved_passages`: for each of the passages
+  given to the model, its rank in the vector arm, its rank in the keyword arm (or none), the RRF
+  score, its position in the fused list, the re-rank score, and whether a verified citation
+  quotes it. A `pipeline` object adds what each stage did: how many candidates each search arm
+  contributed, how many quotes the model proposed and how many survived verification, and the
+  milliseconds spent embedding, searching, re-ranking and generating. The playground turns both
+  into a step-by-step walkthrough of that answer.
 
 #### A note on determinism and `temperature=0`
 
@@ -225,11 +249,62 @@ Practical guidance:
 
 ### Prerequisites
 
-- Docker + Docker Compose (for PostgreSQL 16 with pgvector)
+- Docker + Docker Compose (for PostgreSQL 16 with pgvector), or `pip install pgserver` for an
+  embedded server without Docker
 - Python 3.11+ (3.12 recommended)
-- API keys: `ANTHROPIC_API_KEY` (generation + contextualizer), `OPENAI_API_KEY` (embeddings),
-  `COHERE_API_KEY` (re-ranking). The service degrades gracefully without the last two
-  (`EMBEDDING_PROVIDER=hashing`, `RERANK_PROVIDER=none`) so you can smoke-test the stack offline.
+- Provider keys, depending on the stack you choose (next section). The paid defaults expect
+  `ANTHROPIC_API_KEY` (generation + contextualizer), `OPENAI_API_KEY` (embeddings) and
+  `COHERE_API_KEY` (re-ranking); the zero-cost stack needs only an OpenRouter key.
+
+> `API_KEY` is **not** a provider key. It is the optional inbound secret that protects this
+> service's own `/api/v1/*` endpoints (`X-API-Key` header). Leave it empty for local work.
+
+### Zero-cost stack: OpenRouter free models + local embeddings and re-ranking
+
+Every stage has a free option. Pick them with six settings (a ready-made block sits at the **end**
+of `.env.example`: in a dotenv file the last value of a name wins, so the block overrides the
+section defaults above it). The app reads `.env` and then `.env.local`; both are git-ignored.
+
+| Stage | Paid default | Free option | Setting |
+|---|---|---|---|
+| Generation | Claude Opus 5.5 | Ordered chain of OpenRouter `:free` models | `LLM_PROVIDER=openrouter`, `OPENROUTER_API_KEY` |
+| Context preambles | Claude Haiku 5.5 | Offline heuristic (title, section, page), or the same free chain | `CONTEXTUALIZER_PROVIDER=heuristic` or `openrouter` |
+| Embeddings | OpenAI `text-embedding-3-small` | Local ONNX `BAAI/bge-small-en-v1.5` (384 dims, 67 MB) | `EMBEDDING_PROVIDER=fastembed`, `EMBEDDING_DIMENSIONS=384` |
+| Re-ranking | Cohere Rerank v3.5 | Local cross-encoder `Xenova/ms-marco-MiniLM-L-6-v2` (80 MB) | `RERANK_PROVIDER=fastembed` |
+| Database | - | PostgreSQL in Docker, or `pgserver` | - |
+
+```bash
+pip install -r requirements-local-models.txt       # fastembed (onnxruntime + model weights)
+python scripts/openrouter_smoke.py                  # 1-2 free requests: catalogue, allowance, one grounded answer
+```
+
+How the OpenRouter path works (the same design as the Phase 1 extraction service):
+
+- `OPENROUTER_MODELS` is an ordered chain. The first model is the primary; each later one is
+  tried only when the earlier ones fail (429, in-band upstream error, withdrawal, truncation,
+  invalid JSON). The default, `nvidia/nemotron-3-super-120b-a12b:free` then
+  `liquid/lfm-2.5-2.6b:free`, is the chain Phase 1 measured on 7 October 2026; both support
+  strict JSON-schema output and sit on different upstream providers.
+- Strict `json_schema` output is requested first. A model that rejects it is retried in plain
+  JSON mode with the schema spelled out in the system prompt; code fences and surrounding prose
+  are stripped before validation. `temperature=0.0` is sent.
+- `OPENROUTER_FREE_ONLY=true` refuses any chain entry without the `:free` suffix, so a typo can
+  never spend money.
+- Request starts are paced to `OPENROUTER_REQUESTS_PER_MINUTE` (20, OpenRouter's free-model
+  limit). The daily allowance is 50 requests without credits and 1000 after a one-time $10
+  purchase. The contextualizer costs **one request per chunk**, which is why the preset uses
+  the heuristic preamble; `CONTEXTUALIZER_MAX_LLM_CALLS_PER_DOCUMENT` caps the spend when you
+  do switch it to `openrouter`.
+- Free models are withdrawn often. The smoke script reports which chain ids the public catalogue
+  still lists and how much of today's allowance remains.
+- **Data handling:** free endpoints may keep and train on what you send them. Use sample or
+  redacted documents, never real compliance records, while running on free models.
+
+What you give up: the local embedding model is smaller than `text-embedding-3-small` (recall
+drops a little on nuanced queries), the MiniLM cross-encoder is weaker than Cohere's
+(`BAAI/bge-reranker-v2-m3-int8` narrows the gap at 570 MB), and free generation models are
+slower and less consistent than Claude. The grounding layer does not change: every citation is
+still verified against the stored text, whichever model wrote it.
 
 ### 1. Start PostgreSQL
 
@@ -271,17 +346,86 @@ docker compose --profile full up --build
 ### Security and limits
 
 - **Auth.** Set `API_KEY` and every `/api/v1/*` request must carry it in `X-API-Key`
-  (constant-time comparison; `/health` stays open for probes). Leave it empty for local work.
-- **Uploads.** A pure-ASGI middleware rejects bodies larger than `MAX_UPLOAD_BYTES` from the
-  `Content-Length` header or while streaming, *before* the multipart body is parsed and spooled to
-  disk. `MAX_PDF_PAGES` is checked before any text extraction and `MAX_CHUNKS_PER_DOCUMENT`
-  bounds the number of LLM and embedding calls one upload can trigger (both return 413).
+  (constant-time comparison; `/health` and `/livez` stay open for probes). Leave it empty for
+  local work.
+- **Request bodies.** A pure-ASGI middleware runs before FastAPI reads any body. For uploads it
+  checks the key first (so an anonymous upload is refused before a byte is read), then
+  `MAX_UPLOAD_BYTES`; every other POST is limited to `MAX_JSON_BODY_BYTES` (32 KB). Both limits
+  apply to `Content-Length` and to streamed bodies. `MAX_PDF_PAGES` is checked before any text
+  extraction and `MAX_CHUNKS_PER_DOCUMENT` bounds the number of LLM and embedding calls one
+  upload can trigger (both return 413).
+- **Questions** are 3 to 2000 characters, refused when they contain control characters, and
+  folded like the documents (ligatures to letters; superscripts, subscripts and fractions kept,
+  so `10³` never becomes `103`).
 - **Error responses** never echo upstream provider bodies (which can contain request ids, quota
   details or key fragments); clients get a provider name, a retryable/permanent hint and an
-  incident id that matches the server log line.
+  incident id that matches the server log line. Database failures are a 503 with an incident id
+  and no SQL, and validation errors never repeat the rejected input.
+- **Liveness vs health.** `/livez` answers without touching anything; `/health` checks the
+  database and pgvector. Point host probes and uptime monitors at `/livez`, so they never keep a
+  serverless database awake.
 - **Logs** carry identifiers and sizes, not document text or model drafts.
 - **Compose** binds PostgreSQL and the API to `127.0.0.1` by default; override `POSTGRES_BIND` /
   `API_BIND` deliberately, and change the default database password before doing so.
+
+---
+
+## Public showcase
+
+`DEMO_MODE=true` turns the service into something that can be left on the open internet on a
+free account. `render.yaml` sets it; `python scripts/run_local_demo.py` runs the same thing on
+your machine.
+
+| | Normal mode | Demo mode |
+|---|---|---|
+| `POST /api/v1/ingest` | Open, or `X-API-Key` when `API_KEY` is set | Only with `API_KEY`; without one it answers 403 |
+| `POST /api/v1/query` | Open, or `X-API-Key` when `API_KEY` is set | Open to everyone, but budgeted (below) |
+| Corpus | Whatever you ingest | `demo/` is ingested once into an empty database |
+| `/docs` | Served | Hidden when `ENVIRONMENT=production` |
+
+**The budget** (`app/budget.py`) refuses a question with `429` and a `Retry-After` header when
+one visitor address passes 10 a minute or 60 a day, everyone together passes 20 a minute or 800
+a day, or OpenRouter's own count of the day's free requests (read once a minute) falls to a
+reserve (50, or a fifth of the account's daily allowance when that is smaller). That last rule is
+the one a restart cannot erase: a free host forgets everything in memory. Before the budget, two
+cheap checks spend nothing: questions over 500 characters get `422`, and a fifth question while
+four are being answered gets `503` with `Retry-After`.
+
+**Who is a visitor.** Behind Render the address comes from `CF-Connecting-IP`, which Cloudflare
+overwrites (`CLIENT_IP_HEADER`). The left-most `X-Forwarded-For` entry is never used, because
+proxies append to that header and the client writes its start; the fallback is the entry
+`TRUSTED_PROXY_HOPS` places from the right. IPv6 addresses count per /64 network. With
+`TRUST_PROXY_HEADERS=false` (the default) only the socket address is used.
+
+**The playground** at `/` is a handful of static files with no build step. It asks a question,
+shows the answer with its verbatim citations, and then walks through how that answer was built,
+one stage at a time, with the numbers from that very request: the vector and keyword ranks, the
+Reciprocal Rank Fusion arithmetic, how the cross-encoder reordered the candidates, how many
+quotes survived verification, and where the time went. Each step links to the file that
+implements it. Below the question box, a rank-fusion lab lets you change `k` or switch a search
+arm off and watch the fused order change, and a glossary explains each concept in a few
+sentences. The teaching layer (`assets/explain.js` and `explain.css`) is shared verbatim with the
+project page; `tests/test_site.py` keeps the two copies identical and checks that every code link
+points to a file that exists.
+
+**The project page** (`site/`) is published by GitHub Pages. It shows `site/recorded/runs.json`,
+which `scripts/record_runs.py` writes by driving the real application; nothing in it is edited
+by hand, and `tests/test_site.py` re-checks every recorded quote against the sample PDFs. Each
+recorded run opens into the same walkthrough as the playground, so the page teaches even while
+the live demo sleeps.
+
+**Fitting in 512 MB.** The two local models first took 643 MB and grew to 856 MB within a few
+questions, which a free Render instance would not survive. Three changes brought that to 390 MB
+steady and 441 MB at peak (measured on Windows, both models loaded, after a real generation):
+
+| Change | Effect |
+|---|---|
+| `FASTEMBED_LOW_MEMORY=true`: ONNX Runtime's CPU memory arena off | 843 MB to 385 MB steady in isolation, about 15% slower inference |
+| PyMuPDF imported only when a PDF is parsed | 26 MB less in a service that only answers questions |
+| Models loaded on first use, then warmed in the background in demo mode | Start-up stays fast; the first visitor does not pay for loading |
+
+The Docker image downloads both models at build time and runs with `HF_HUB_OFFLINE=1`, because a
+free instance starts with an empty disk every time it wakes.
 
 ---
 
@@ -393,9 +537,10 @@ All settings live in `app/config.py` and are read from the environment or `.env`
 |---|---|---|
 | `DATABASE_URL` | `postgresql+asyncpg://rag:rag@localhost:5432/rag` | asyncpg driver required |
 | `EMBEDDING_PROVIDER` / `EMBEDDING_MODEL` / `EMBEDDING_DIMENSIONS` | `openai` / `text-embedding-3-small` / `1536` | Dimensions are baked into the `vector(N)` column; change them before first ingestion |
-| `LLM_PROVIDER` / `GENERATION_MODEL` / `GENERATION_EFFORT` | `anthropic` / `claude-opus-5-5` / `low` | Effort is the Claude 5.x cost/latency lever |
-| `CONTEXTUALIZER_MODEL` / `CONTEXTUALIZER_CONCURRENCY` | `claude-haiku-5-5` / `8` | Set `CONTEXTUALIZER_ENABLED=false` for heuristic-only preambles |
-| `RERANK_PROVIDER` / `COHERE_RERANK_MODEL` | `cohere` / `rerank-v3.5` | `none` keeps RRF order |
+| `LLM_PROVIDER` / `GENERATION_MODEL` / `GENERATION_EFFORT` | `anthropic` / `claude-opus-5-5` / `low` | `openai` and `openrouter` are the alternatives; effort is the Claude 5.x cost/latency lever |
+| `OPENROUTER_API_KEY` / `OPENROUTER_MODELS` / `OPENROUTER_FREE_ONLY` | unset / Phase 1 chain / `true` | Ordered `:free` chain with fallback; see the zero-cost section |
+| `CONTEXTUALIZER_PROVIDER` / `CONTEXTUALIZER_MODEL` | `auto` / `claude-haiku-5-5` | `heuristic` makes no model calls; `openrouter` costs one free request per chunk |
+| `RERANK_PROVIDER` / `COHERE_RERANK_MODEL` / `FASTEMBED_RERANK_MODEL` | `cohere` / `rerank-v3.5` / `Xenova/ms-marco-MiniLM-L-6-v2` | `fastembed` runs a local cross-encoder; `none` keeps RRF order |
 | `RRF_K` / `TOP_K_RETRIEVAL` / `TOP_K_RERANK` | `60` / `50` / `3` | The spec's fusion and narrowing parameters |
 | `HNSW_M` / `HNSW_EF_CONSTRUCTION` / `HNSW_EF_SEARCH` | `16` / `64` / `100` | Build-time values only apply when the index is first created |
 | `CHUNK_SIZE_TOKENS` / `CHUNK_OVERLAP_TOKENS` | `400` / `60` | Regex token counter; plug in tiktoken via `counter=` if you need BPE-exact sizes |
@@ -403,6 +548,15 @@ All settings live in `app/config.py` and are read from the environment or `.env`
 | `MAX_UPLOAD_BYTES` / `MAX_PDF_PAGES` / `MAX_CHUNKS_PER_DOCUMENT` | `50 MiB` / `500` / `2000` | Ingestion ceilings, all enforced before expensive work |
 | `GENERATION_MAX_TOKENS` / `CONTEXTUALIZER_MAX_TOKENS` | `4096` / `2048` | Thinking counts toward these budgets on Claude 5.x; the generator cap is 16K (non-streaming SDK limit) |
 | `DB_CONNECT_TIMEOUT_S` / `HEALTH_TIMEOUT_S` | `10` / `5` | Fail fast on unreachable hosts; `/health` never hangs on a black-holed database |
+| `DB_STARTUP_RETRIES` | `3` | Start-up retries while a serverless database resumes (a wrong setting is never retried) |
+| `MAX_JSON_BODY_BYTES` | `32768` | Every POST except uploads, checked before the body is parsed |
+| `DEMO_MODE` | `false` | Public showcase: closed uploads, budgeted questions, seeded corpus |
+| `QUERY_RATE_LIMIT_PER_MINUTE` / `QUERY_DAILY_LIMIT_PER_CLIENT` | `10` / `60` | Per visitor address (demo mode) |
+| `QUERY_GLOBAL_LIMIT_PER_MINUTE` / `QUERY_DAILY_LIMIT` | `20` / `800` | For everyone together (demo mode) |
+| `QUERY_MAX_INFLIGHT` / `DEMO_MAX_QUERY_CHARS` | `4` / `500` | Load shedding and question length (demo mode) |
+| `TRUST_PROXY_HEADERS` / `CLIENT_IP_HEADER` / `TRUSTED_PROXY_HOPS` | `false` / unset / `1` | Where the visitor address comes from behind a proxy (see Public showcase) |
+| `LOCAL_INFERENCE_CONCURRENCY` | `1` | Local model calls at once (embedding and re-ranking share it) |
+| `DOCUMENTS_CACHE_TTL_S` | `300` | Corpus listing cache, so page views do not wake the database |
 
 ---
 
@@ -438,6 +592,20 @@ developer shell full of real keys or odd `LOG_LEVEL` values cannot change the ou
   the contextualizer's cache warm-up ordering.
 - `tests/test_config.py` - settings parsing quirks (empty values mean unset, case-insensitive log
   level) and cross-field rules.
+- `tests/test_openrouter.py` - the zero-cost stack: chain fallback on 429 / in-band errors /
+  withdrawal / truncation / invalid JSON, strict-schema-to-JSON-mode retry, key rejection,
+  content-filter refusals, request pacing, the free-only guard, the OpenRouter contextualizer
+  with its call cap, the local cross-encoder re-ranker and the OpenRouter/fastembed embedders.
+- `tests/test_demo_mode.py` - the public showcase: closed uploads, the question budget (per
+  visitor, per minute, per day, OpenRouter's own count), corpus seeding, model warm-up, the
+  playground, hidden docs in production, CORS, hosted-database URLs, and that the committed
+  `.env.example` holds no secret.
+- `tests/test_page_attribution.py` - page maps across page breaks and overlap, and that a
+  citation carries the page its quote is on.
+- `tests/test_site.py` - holds the published pages to their sources: every recorded quote is
+  found verbatim in the sample PDF on the page it cites, the recorded stack matches the code,
+  the pages load only their own scripts, and `render.yaml`, the `Dockerfile` and the settings
+  agree with each other.
 
 Live PostgreSQL integration tests run only when `TEST_DATABASE_URL` is set. They create and drop
 their own schema (`rag_test`), verify the DDL and index definitions, assert that the SQL RRF scores
@@ -502,29 +670,50 @@ RAG-triad faithfulness via Ragas/DeepEval.
 ```
 hybrid-retrieval-engine/
 ├── docker-compose.yml           # pgvector/pgvector:pg16 (+ optional api profile)
-├── Dockerfile                   # non-root, HEALTHCHECK
+├── Dockerfile                   # production image: non-root, local models baked in, offline
+├── render.yaml                  # Render Blueprint: one free web service in demo mode
 ├── .dockerignore
 ├── requirements.txt
 ├── .env.example
 ├── pyproject.toml               # pytest (asyncio auto mode) + ruff config
 ├── app/
-│   ├── config.py                # pydantic-settings
+│   ├── config.py                # pydantic-settings (paid defaults + zero-cost switches)
+│   ├── openrouter.py            # free-model chain: fallback, strict schema -> JSON mode, pacing
+│   ├── budget.py                # demo mode: who may ask, how often, and the day's allowance
+│   ├── demo.py                  # the sample corpus manifest and its idempotent seeding
 │   ├── database.py              # async engine, DDL bootstrap, transactional writes
 │   ├── schemas.py               # API + internal Pydantic models
 │   ├── errors.py                # ProviderError / PDFParseError / ConfigurationError
+│   ├── textnorm.py              # Unicode folding shared by PDF text and questions
+│   ├── playground/static/       # the browser playground served at / (no build step);
+│   │                            # assets/explain.js is the walkthrough, lab and glossary
 │   ├── ingestion/
 │   │   ├── pdf_parser.py        # PyMuPDF blocks with page numbers and bboxes
-│   │   ├── chunker.py           # structural recursive chunker with overlap
-│   │   └── contextualizer.py    # Anthropic Contextual Retrieval worker (+ heuristic fallback)
+│   │   ├── chunker.py           # structural recursive chunker with overlap and page maps
+│   │   ├── pipeline.py          # parse -> chunk -> contextualize -> embed -> store
+│   │   └── contextualizer.py    # Contextual Retrieval worker: Claude / OpenRouter / heuristic
 │   ├── retrieval/
-│   │   ├── embedder.py          # OpenAI / fastembed / hashing embedders
+│   │   ├── embedder.py          # OpenAI / OpenRouter / fastembed (local) / hashing embedders
 │   │   ├── hybrid_search.py     # RRF CTE + pure-Python reference
-│   │   └── reranker.py          # Cohere Rerank v3.5 (+ passthrough)
+│   │   └── reranker.py          # Cohere Rerank v3.5 / fastembed cross-encoder / passthrough
 │   ├── generator/
 │   │   └── grounded_llm.py      # constrained output + verbatim citation verification
-│   └── main.py                  # FastAPI routes, body-size middleware, optional API-key auth
+│   └── main.py                  # FastAPI routes, request guard middleware, auth, playground, CORS
+├── requirements-local-models.txt # fastembed for the zero-cost stack
+├── demo/                        # four fictional quality documents (PDF) + corpus.json
+├── site/                        # the project page, published on GitHub Pages
+│   ├── index.html               # the one place that holds the live demo's address
+│   ├── assets/                  # site.css, site.js, theme.js, favicon.svg, and a copy of
+│   │                            # explain.js/.css (the teaching layer): no build step
+│   └── recorded/runs.json       # seven real runs, saved as the service returned them
+├── docs/DEPLOY.md               # putting it online, step by step
+├── .github/workflows/           # tests.yml (suite + lint), pages.yml (publishes site/)
 ├── scripts/
 │   ├── benchmark.py             # p50/p95/p99 latency against a running instance
+│   ├── make_demo_corpus.py      # writes the sample PDFs and their manifest
+│   ├── record_runs.py           # seeds the corpus and records the runs shown on the page
+│   ├── run_local_demo.py        # the showcase on your machine, as Render runs it
+│   ├── openrouter_smoke.py      # live check of the free-model chain (1-2 free requests)
 │   └── run_live_db_tests.py     # live-DB tests on embedded PostgreSQL (pgserver)
 └── tests/                       # hermetic suite + opt-in live PostgreSQL tests
 ```
@@ -536,8 +725,11 @@ hybrid-retrieval-engine/
 This repository is the Phase 2 milestone of a four-phase Applied AI curriculum; the items below are
 intentionally out of scope here and land in later phases:
 
-- Authentication / rate limiting in front of the API (reverse proxy or FastAPI dependency).
+- Per-user authentication and quotas (today: one shared `API_KEY`, and in demo mode an
+  in-process budget per visitor address, which a restart forgets and a second worker would not
+  share).
 - Idempotent re-ingestion (content hash on `documents`) and a `DELETE /api/v1/documents/{id}`.
+- OCR for scanned PDFs, and tables: text is extracted as layout blocks only.
 - Observability: Langfuse tracing of every stage, token and cost telemetry (Phase 4).
 - Evaluation CI: golden query set, RAG-triad metrics, PR gating on faithfulness (Phase 4).
 - Redis semantic cache for repeated queries (Phase 4).

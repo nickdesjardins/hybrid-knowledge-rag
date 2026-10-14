@@ -8,12 +8,14 @@ candidates and keep only the top ``top_n`` (3 by default) for generation.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections.abc import Sequence
 from typing import Protocol
 
 from app.config import Settings
 from app.errors import ConfigurationError, ProviderError
+from app.retrieval.embedder import local_inference_gate, local_model_kwargs
 from app.schemas import RerankedChunk, RetrievedChunk
 
 logger = logging.getLogger(__name__)
@@ -104,9 +106,79 @@ class CohereReranker:
         return reranked[:top_n]
 
 
-def build_reranker(settings: Settings) -> Reranker:
+class FastEmbedReranker:
+    """Local cross-encoder re-ranking (ONNX via fastembed). Free, offline after the first download.
+
+    ``Xenova/ms-marco-MiniLM-L-6-v2`` (80 MB) is the default; ``BAAI/bge-reranker-v2-m3-int8``
+    is stronger and multilingual at 570 MB. Scores are raw cross-encoder logits, higher is better.
+    """
+
+    name = "fastembed"
+
+    def __init__(
+        self,
+        settings: Settings,
+        encoder: object | None = None,
+        *,
+        gate: asyncio.Semaphore | None = None,
+    ) -> None:
+        self.model = settings.fastembed_rerank_model
+        if encoder is None:
+            try:
+                import fastembed.rerank.cross_encoder  # noqa: F401 - fail fast when missing
+            except ImportError as exc:  # pragma: no cover - optional dependency
+                raise ConfigurationError(
+                    "pip install -r requirements-local-models.txt to use RERANK_PROVIDER=fastembed"
+                ) from exc
+        # Loaded on first use: keeps startup fast and memory low until a query arrives.
+        self._encoder = encoder
+        self._load_lock = asyncio.Lock()
+        self._gate = gate or local_inference_gate(settings)
+        self._batch_size = settings.fastembed_rerank_batch_size
+        self._model_kwargs = local_model_kwargs(settings)
+
+    async def _get_encoder(self) -> object:
+        if self._encoder is None:
+            async with self._load_lock:
+                if self._encoder is None:
+                    from fastembed.rerank.cross_encoder import TextCrossEncoder
+
+                    logger.info("Loading local cross-encoder %s", self.model)
+                    async with self._gate:
+                        self._encoder = await asyncio.to_thread(
+                            lambda: TextCrossEncoder(model_name=self.model, **self._model_kwargs)
+                        )
+        return self._encoder
+
+    async def rerank(
+        self, query: str, candidates: Sequence[RetrievedChunk], *, top_n: int
+    ) -> list[RerankedChunk]:
+        if not candidates:
+            return []
+        encoder = await self._get_encoder()
+        documents = [chunk.contextualized_content for chunk in candidates]
+        async with self._gate:
+            scores = await asyncio.to_thread(
+                lambda: [
+                    float(s) for s in encoder.rerank(query, documents, batch_size=self._batch_size)
+                ]
+            )
+        if len(scores) != len(candidates):
+            raise ProviderError(
+                "fastembed-rerank", f"got {len(scores)} scores for {len(candidates)} documents"
+            )
+        order = sorted(range(len(candidates)), key=lambda i: (-scores[i], candidates[i].id))
+        return [
+            _to_reranked(candidates[i], scores[i], position)
+            for position, i in enumerate(order[:top_n], start=1)
+        ]
+
+
+def build_reranker(settings: Settings, *, gate: asyncio.Semaphore | None = None) -> Reranker:
     if settings.rerank_provider == "cohere":
         return CohereReranker(settings)
+    if settings.rerank_provider == "fastembed":
+        return FastEmbedReranker(settings, gate=gate)
     logger.warning(
         "RERANK_PROVIDER=none: candidates keep RRF order without cross-encoder re-ranking"
     )

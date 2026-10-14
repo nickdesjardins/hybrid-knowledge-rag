@@ -23,6 +23,7 @@ and a prompt that forbids inference. The OpenAI path still sends ``temperature=0
 from __future__ import annotations
 
 import html
+import json
 import logging
 import secrets
 import unicodedata
@@ -34,6 +35,7 @@ from pydantic import BaseModel, Field, ValidationError
 
 from app.config import Settings
 from app.errors import ConfigurationError, ProviderError
+from app.ingestion.chunker import page_for_offset
 from app.schemas import AnswerStatus, Citation, GroundedAnswer, RerankedChunk
 
 logger = logging.getLogger(__name__)
@@ -66,8 +68,8 @@ single passage (no paraphrasing, no ellipses, no merged spans) and names that pa
 5. If passages conflict, say so in the answer and cite each side.
 6. confidence_score is a number from 0.0 to 1.0 expressing how completely the cited text supports \
 the answer. Use 0.0 whenever is_grounded is False.
-7. Keep the answer concise and factual. Mention page numbers when they help the reader locate the \
-source."""
+7. Keep the answer concise and factual. Do not write page numbers in the answer: every citation \
+is shown with the page its quote is on."""
 
 
 # ------------------------------------------------------------------ constrained output
@@ -151,7 +153,7 @@ def build_user_prompt(query: str, chunks: Sequence[RerankedChunk], nonce: str | 
         parts.append(
             f'<{passage_tag} chunk_id="{_attr(chunk.id)}" '
             f'document_title="{_attr(chunk.document_title)}" '
-            f'page_number="{int(chunk.page_number)}" rank="{int(chunk.rerank_position)}">'
+            f'rank="{int(chunk.rerank_position)}">'
         )
         if context:
             parts.append(f"<{context_tag}>{context}</{context_tag}>")
@@ -324,9 +326,63 @@ class OpenAIGroundedGenerator:
         return GenerationResult(output=parsed, model=self.model)
 
 
+class OpenRouterGroundedGenerator:
+    """Zero-cost generation: an ordered chain of ``:free`` OpenRouter models.
+
+    Mirrors the Phase 1 extraction service: strict ``json_schema`` output first, plain JSON mode
+    with the schema in the system prompt when a model rejects it, and fallback to the next model
+    on any failure. ``temperature=0.0`` is sent (OpenAI-compatible API). ``GenerationResult.model``
+    reports the model that actually answered.
+    """
+
+    name = "openrouter"
+
+    def __init__(
+        self, settings: Settings, client: object | None = None, chat: object | None = None
+    ) -> None:
+        from app.openrouter import OpenRouterChat, strict_json_schema
+
+        self.models = settings.openrouter_model_chain
+        self.model = ",".join(self.models)
+        self.max_tokens = settings.generation_max_tokens
+        self.temperature = settings.generation_temperature
+        self._schema = strict_json_schema(LLMGroundedOutput)
+        self._json_mode_suffix = (
+            "\n\nThe JSON object MUST conform exactly to the following JSON Schema. Do not add "
+            "keys, prose or markdown fences.\n" + json.dumps(self._schema, indent=2)
+        )
+        self._chat = chat or OpenRouterChat(settings, models=self.models, client=client)
+
+    async def generate(self, query: str, chunks: Sequence[RerankedChunk]) -> GenerationResult:
+        from app.openrouter import extract_json_object
+
+        def validate(content: str) -> LLMGroundedOutput:
+            return LLMGroundedOutput.model_validate(extract_json_object(content))
+
+        outcome = await self._chat.complete(
+            messages=[
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": build_user_prompt(query, chunks)},
+            ],
+            max_tokens=self.max_tokens,
+            temperature=self.temperature,
+            schema=self._schema,
+            schema_name="grounded_answer",
+            json_mode_system_suffix=self._json_mode_suffix,
+            validate=validate,
+        )
+        if outcome.refused:
+            return refusal_result(
+                outcome.model, "The model declined to answer this request (content filter)."
+            )
+        return GenerationResult(output=outcome.parsed, model=outcome.model)
+
+
 def build_generator(settings: Settings) -> GroundedGenerator:
     if settings.llm_provider == "openai":
         return OpenAIGroundedGenerator(settings)
+    if settings.llm_provider == "openrouter":
+        return OpenRouterGroundedGenerator(settings)
     return AnthropicGroundedGenerator(settings)
 
 
@@ -393,8 +449,8 @@ def _normalize_with_map(text: str) -> tuple[str, list[int]]:
     return "".join(out), index_map
 
 
-def locate_quote(quote: str, source: str) -> str | None:
-    """Return the exact source span matching ``quote`` (modulo normalisation), or None."""
+def locate_quote_span(quote: str, source: str) -> tuple[int, int] | None:
+    """Return ``(start, end)`` of the source span matching ``quote`` (modulo normalisation)."""
     normalized_quote, _ = _normalize_with_map(quote)
     if not normalized_quote:
         return None
@@ -408,7 +464,13 @@ def locate_quote(quote: str, source: str) -> str | None:
     # must still include the accent in the returned verbatim span.
     while end < len(source) and unicodedata.category(source[end]) == "Mn":
         end += 1
-    return source[start:end]
+    return start, end
+
+
+def locate_quote(quote: str, source: str) -> str | None:
+    """Return the exact source span matching ``quote`` (modulo normalisation), or None."""
+    span = locate_quote_span(quote, source)
+    return source[span[0] : span[1]] if span else None
 
 
 def verify_citations(
@@ -429,8 +491,9 @@ def verify_citations(
         if chunk is None or not quote or len(quote) > MAX_QUOTE_CHARS:
             dropped += 1
             continue
-        exact = locate_quote(quote, chunk.raw_content)
-        if exact is None:
+        span = locate_quote_span(quote, chunk.raw_content)
+        exact = chunk.raw_content[span[0] : span[1]] if span else None
+        if span is None or exact is None:
             # Sizes only: document text must not leak into application logs.
             logger.warning(
                 "Dropping unverifiable citation for chunk %s (%d chars)", chunk.id, len(quote)
@@ -444,7 +507,8 @@ def verify_citations(
         verified.append(
             Citation(
                 document_title=chunk.document_title,
-                page_number=chunk.page_number,
+                # The page the quote itself is on: a chunk can run across a page break.
+                page_number=page_for_offset(chunk.page_map, span[0], chunk.page_number),
                 chunk_id=chunk.id,
                 verbatim_quote=exact,
             )

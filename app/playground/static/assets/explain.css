@@ -1,0 +1,88 @@
+/* Teaching layer shared by the project page and the playground (identical copies; see explain.js).
+   Relies on the theme tokens both pages define: --panel, --ink, --muted, --line, --accent,
+   --chip, --code, --ok, --warn. */
+:root {
+  --xp-embed: #7a5cc2;
+  --xp-search: #1f5f8b;
+  --xp-rerank: #1d7a46;
+  --xp-generate: #b7791f;
+  --xp-answer-bg: rgba(29, 122, 70, 0.09);
+}
+:root[data-theme="dark"] {
+  --xp-embed: #b39ae6;
+  --xp-search: #6fb3e0;
+  --xp-rerank: #58c389;
+  --xp-generate: #e3b341;
+  --xp-answer-bg: rgba(88, 195, 137, 0.12);
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --xp-embed: #b39ae6;
+    --xp-search: #6fb3e0;
+    --xp-rerank: #58c389;
+    --xp-generate: #e3b341;
+    --xp-answer-bg: rgba(88, 195, 137, 0.12);
+  }
+}
+
+[hidden] { display: none !important; }
+
+.xp { margin-top: 18px; }
+.xp-title { font-size: 1.05rem; margin: 18px 0 4px; color: var(--ink); }
+.xp-lede { margin: 0 0 12px; color: var(--muted); font-size: 0.93rem; max-width: 72ch; }
+.xp-note { margin: 8px 0 0; color: var(--muted); font-size: 0.88rem; }
+.xp-question { margin: 0 0 10px; font-weight: 600; }
+
+/* stacked bars: time per stage, and what each search arm found */
+.xp-stack { margin: 8px 0 14px; }
+.xp-bar { display: flex; height: 14px; border-radius: 999px; overflow: hidden; background: var(--chip); border: 1px solid var(--line); }
+.xp-seg { display: block; min-width: 3px; flex-basis: 0; }
+.xp-seg--embed { background: var(--xp-embed); }
+.xp-seg--search, .xp-seg--both { background: var(--xp-search); }
+.xp-seg--rerank, .xp-seg--keyword { background: var(--xp-rerank); }
+.xp-seg--generate, .xp-seg--vector { background: var(--xp-generate); }
+.xp-legend { display: flex; flex-wrap: wrap; gap: 6px 16px; margin-top: 8px; font-size: 0.86rem; color: var(--muted); }
+.xp-legend__item { display: inline-flex; align-items: center; gap: 6px; font-variant-numeric: tabular-nums; }
+.xp-dot { width: 10px; height: 10px; border-radius: 3px; flex: none; }
+
+.xp-toggle { background: none; border: 1px solid var(--line); border-radius: 8px; color: var(--ink); padding: 5px 12px; font: inherit; font-size: 0.86rem; cursor: pointer; margin-bottom: 8px; }
+.xp-toggle:hover { border-color: var(--accent); }
+
+/* the six steps and the glossary share the same disclosure style */
+/* minmax(0, 1fr): a grid item otherwise grows to its widest table, past a phone's width */
+.xp-steps { list-style: none; padding: 0; margin: 0; display: grid; grid-template-columns: minmax(0, 1fr); gap: 8px; }
+.xp-concepts { display: grid; grid-template-columns: minmax(0, 1fr); gap: 8px; }
+.xp-step details, .xp-concept { border: 1px solid var(--line); border-radius: 10px; background: var(--panel); }
+.xp-step summary, .xp-concept summary { display: flex; align-items: center; gap: 12px; padding: 10px 12px; cursor: pointer; list-style: none; }
+.xp-step summary::-webkit-details-marker, .xp-concept summary::-webkit-details-marker { display: none; }
+.xp-step summary::after, .xp-concept summary::after { content: "+"; color: var(--muted); font-weight: 700; padding-left: 4px; flex: none; }
+.xp-step details[open] > summary::after, .xp-concept[open] > summary::after { content: "\2212"; }
+.xp-step summary:focus-visible, .xp-concept summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 10px; }
+.xp-n { display: inline-grid; place-items: center; width: 26px; height: 26px; border-radius: 50%; background: var(--accent); color: var(--accent-ink); font-weight: 700; font-size: 0.85rem; flex: none; }
+.xp-head { display: grid; gap: 1px; min-width: 0; flex: 1 1 auto; }
+.xp-name { font-weight: 650; }
+.xp-sum { color: var(--muted); font-size: 0.88rem; overflow-wrap: anywhere; }
+.xp-time { color: var(--muted); font-size: 0.85rem; font-variant-numeric: tabular-nums; white-space: nowrap; flex: none; }
+.xp-body { padding: 0 14px 12px 50px; font-size: 0.94rem; }
+.xp-concept .xp-body { padding-left: 14px; }
+.xp-body p { margin: 8px 0; }
+.xp-why { color: var(--ink); }
+.xp-why strong { color: var(--accent); }
+.xp-code { font-size: 0.86rem; color: var(--muted); }
+.xp-code a { overflow-wrap: anywhere; }
+.xp-prompt summary { cursor: pointer; color: var(--accent); font-size: 0.9rem; }
+.xp-prompt pre { white-space: pre-wrap; font-size: 0.8rem; max-height: 320px; overflow: auto; background: var(--code); padding: 10px; border-radius: 8px; }
+.xp-table td.num { white-space: normal; min-width: 4.5em; }
+.xp-table .preview { max-width: 42ch; }
+@media (max-width: 600px) {
+  .xp-body { padding-left: 14px; }
+  .xp-step summary { flex-wrap: wrap; }
+  .xp-step summary .xp-time { margin-left: 38px; }
+}
+
+/* rank-fusion lab */
+.xp-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 18px; margin: 0 0 10px; }
+.xp-k { font-weight: 650; font-variant-numeric: tabular-nums; min-width: 4.5em; }
+.xp-controls input[type="range"] { flex: 1 1 220px; accent-color: var(--accent); }
+.xp-check { display: inline-flex; align-items: center; gap: 4px; font-size: 0.92rem; cursor: pointer; }
+.xp-lab tr.xp-answer td { background: var(--xp-answer-bg); }

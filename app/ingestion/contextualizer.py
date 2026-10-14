@@ -97,10 +97,10 @@ class HeuristicContextualizer:
     @staticmethod
     def context_for(document: ParsedDocument, chunk: Chunk) -> str:
         section = f" Section: {chunk.section}." if chunk.section else ""
-        return (
-            f"Document: {document.title}.{section} "
-            f"Page {chunk.page_number} of {document.page_count}."
-        )
+        pages = [number for _, number in chunk.page_map] or [chunk.page_number]
+        first, last = min(pages), max(pages)
+        where = f"Page {first}" if first == last else f"Pages {first}-{last}"
+        return f"Document: {document.title}.{section} {where} of {document.page_count}."
 
 
 class AnthropicContextualizer:
@@ -122,6 +122,14 @@ class AnthropicContextualizer:
     async def contextualize(self, document: ParsedDocument, chunks: list[Chunk]) -> list[str]:
         if not chunks:
             return []
+        if len(chunks) > self.settings.contextualizer_max_llm_calls_per_document:
+            logger.warning(
+                "%d chunks exceed CONTEXTUALIZER_MAX_LLM_CALLS_PER_DOCUMENT=%d; "
+                "using heuristic contexts for this document",
+                len(chunks),
+                self.settings.contextualizer_max_llm_calls_per_document,
+            )
+            return await self._fallback.contextualize(document, chunks)
         document_text = document_as_prompt_text(document, self.doc_max_chars)
         nonce = secrets.token_hex(4)
         # Warm the prompt cache with one request, then fan out the rest concurrently.
@@ -201,11 +209,97 @@ class AnthropicContextualizer:
         return True, context
 
 
+class OpenRouterContextualizer:
+    """Contextual Retrieval worker on a chain of free OpenRouter models.
+
+    There is no prompt caching here, so every call carries the (truncated) document; keep
+    ``CONTEXTUALIZER_DOC_MAX_CHARS`` modest and remember the free allowance: one request per
+    chunk, 20 per minute, 50 per day without credits. Documents with more chunks than
+    ``CONTEXTUALIZER_MAX_LLM_CALLS_PER_DOCUMENT`` get heuristic contexts instead.
+    """
+
+    name = "openrouter"
+
+    def __init__(
+        self, settings: Settings, client: object | None = None, chat: object | None = None
+    ) -> None:
+        from app.openrouter import OpenRouterChat
+
+        self.settings = settings
+        self.models = settings.openrouter_contextualizer_chain
+        self.model = ",".join(self.models)
+        self.max_tokens = settings.contextualizer_max_tokens
+        self.doc_max_chars = settings.contextualizer_doc_max_chars
+        self._semaphore = asyncio.Semaphore(settings.contextualizer_concurrency)
+        self._chat = chat or OpenRouterChat(settings, models=self.models, client=client)
+        self._fallback = HeuristicContextualizer()
+
+    async def contextualize(self, document: ParsedDocument, chunks: list[Chunk]) -> list[str]:
+        if not chunks:
+            return []
+        if len(chunks) > self.settings.contextualizer_max_llm_calls_per_document:
+            logger.warning(
+                "%d chunks exceed CONTEXTUALIZER_MAX_LLM_CALLS_PER_DOCUMENT=%d; "
+                "using heuristic contexts to protect the free-model allowance",
+                len(chunks),
+                self.settings.contextualizer_max_llm_calls_per_document,
+            )
+            return await self._fallback.contextualize(document, chunks)
+        document_text = document_as_prompt_text(document, self.doc_max_chars)
+        nonce = secrets.token_hex(4)
+        results = await asyncio.gather(
+            *(self._contextualize_one(document, document_text, chunk, nonce) for chunk in chunks)
+        )
+        failures = sum(1 for ok, _ in results if not ok)
+        if failures:
+            logger.warning(
+                "Contextualizer fell back to heuristic context for %d/%d chunks",
+                failures,
+                len(chunks),
+            )
+        return [context for _, context in results]
+
+    async def _contextualize_one(
+        self, document: ParsedDocument, document_text: str, chunk: Chunk, nonce: str
+    ) -> tuple[bool, str]:
+        from app.errors import ProviderError
+
+        user_text = (
+            f"<document-{nonce}>\n{document_text}\n</document-{nonce}>\n\n"
+            + build_context_instruction(chunk.text, nonce)
+        )
+        async with self._semaphore:
+            try:
+                outcome = await self._chat.complete(
+                    messages=[
+                        {"role": "system", "content": CONTEXT_SYSTEM_PROMPT},
+                        {"role": "user", "content": user_text},
+                    ],
+                    max_tokens=self.max_tokens,
+                    temperature=0.0,
+                )
+            except ProviderError as exc:
+                logger.warning(
+                    "Contextualizer failed on chunk %d: %s", chunk.chunk_index, exc.message
+                )
+                return False, self._fallback.context_for(document, chunk)
+        if outcome.refused:
+            return False, self._fallback.context_for(document, chunk)
+        context = _tidy_context(outcome.content)
+        if not context:
+            return False, self._fallback.context_for(document, chunk)
+        return True, context
+
+
 def build_contextualizer(settings: Settings) -> Contextualizer:
-    if settings.contextualizer_enabled and settings.anthropic_configured:
+    provider = settings.resolved_contextualizer_provider
+    if provider == "anthropic":
         return AnthropicContextualizer(settings)
-    if settings.contextualizer_enabled:
+    if provider == "openrouter":
+        return OpenRouterContextualizer(settings)
+    if settings.contextualizer_enabled and settings.contextualizer_provider != "heuristic":
         logger.warning(
-            "CONTEXTUALIZER_ENABLED is true but ANTHROPIC_API_KEY is missing; using heuristic contexts"
+            "CONTEXTUALIZER_PROVIDER=%s has no API key configured; using heuristic contexts",
+            settings.contextualizer_provider,
         )
     return HeuristicContextualizer()

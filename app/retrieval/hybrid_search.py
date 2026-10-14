@@ -8,6 +8,7 @@ RRF(d) = sum over retrievers m of 1 / (k + rank_m(d)), k = 60 by default.
 
 from __future__ import annotations
 
+import json
 import logging
 import math
 import uuid
@@ -90,6 +91,7 @@ HYBRID_SEARCH_SQL = text(
            c.page_number,
            c.raw_content,
            c.contextualized_content,
+           c.page_map,
            f.rrf_score,
            f.dense_rank,
            f.sparse_rank
@@ -143,6 +145,21 @@ def reciprocal_rank_fusion(
 
     fused = sorted(scores.items(), key=sort_key)
     return fused[:limit] if limit is not None else fused
+
+
+def _decode_page_map(value: object) -> list[tuple[int, int]] | None:
+    """JSONB arrives as text through a raw statement; tolerate both text and decoded lists."""
+    if value is None:
+        return None
+    if isinstance(value, (str, bytes, bytearray)):
+        try:
+            value = json.loads(value)
+        except ValueError:
+            return None
+    try:
+        return [(int(start), int(page)) for start, page in value]  # type: ignore[union-attr]
+    except (TypeError, ValueError):
+        return None
 
 
 class HybridSearcher(Protocol):
@@ -201,6 +218,7 @@ class PostgresHybridSearcher:
                 page_number=int(row["page_number"]),
                 raw_content=row["raw_content"],
                 contextualized_content=row["contextualized_content"],
+                page_map=_decode_page_map(row["page_map"]),
                 rrf_score=float(row["rrf_score"]),
                 dense_rank=int(row["dense_rank"]) if row["dense_rank"] is not None else None,
                 sparse_rank=int(row["sparse_rank"]) if row["sparse_rank"] is not None else None,

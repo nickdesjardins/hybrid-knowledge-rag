@@ -16,7 +16,7 @@ import os
 import uuid
 
 import pytest
-from sqlalchemy import text
+from sqlalchemy import event, text
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from app.config import Settings
@@ -59,9 +59,16 @@ def _settings(**overrides) -> Settings:
 
 @pytest.fixture
 async def db():
-    engine = create_async_engine(
-        DATABASE_URL, connect_args={"server_settings": {"search_path": f"{SCHEMA},public"}}
-    )
+    engine = create_async_engine(DATABASE_URL)
+
+    # A per-connection SET rather than a startup parameter: hosted providers such as Neon
+    # drop unknown startup options, which would silently run the tests in `public`.
+    @event.listens_for(engine.sync_engine, "connect")
+    def _set_search_path(dbapi_connection, _record) -> None:  # type: ignore[no-untyped-def]
+        dbapi_connection.run_async(
+            lambda conn: conn.execute(f"SET search_path TO {SCHEMA}, public")
+        )
+
     async with engine.begin() as conn:
         await conn.execute(text(f"DROP SCHEMA IF EXISTS {SCHEMA} CASCADE"))
         await conn.execute(text(f"CREATE SCHEMA {SCHEMA}"))

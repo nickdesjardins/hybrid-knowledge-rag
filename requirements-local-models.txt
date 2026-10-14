@@ -1,0 +1,6 @@
+# Local (free, offline after first download) embeddings and cross-encoder re-ranking.
+#   pip install -r requirements-local-models.txt
+# Pulls onnxruntime and the model weights from Hugging Face on first use
+# (BAAI/bge-small-en-v1.5 ~67 MB, Xenova/ms-marco-MiniLM-L-6-v2 ~80 MB).
+# Pinned to the minor version whose memory use and API were measured (0.9.0, October 2026).
+fastembed>=0.9,<0.10

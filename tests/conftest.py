@@ -38,7 +38,7 @@ from app.ingestion.pdf_parser import ParsedDocument, parse_pdf_bytes  # noqa: E4
 from app.main import Components, create_app  # noqa: E402
 from app.retrieval.embedder import HashingEmbedder  # noqa: E402
 from app.retrieval.hybrid_search import reciprocal_rank_fusion  # noqa: E402
-from app.schemas import RerankedChunk, RetrievedChunk  # noqa: E402
+from app.schemas import DocumentSummary, RerankedChunk, RetrievedChunk  # noqa: E402
 
 EMBEDDING_DIMS = 256
 
@@ -120,6 +120,7 @@ class InMemoryStore:
         self.documents: dict[str, dict[str, str]] = {}
         self.chunks: list[dict[str, object]] = []
         self.search_calls: list[str | None] = []
+        self.page_counts: dict[str, int | None] = {}
 
     async def ping(self) -> bool:
         return self.healthy
@@ -127,11 +128,33 @@ class InMemoryStore:
     async def pgvector_installed(self) -> bool:
         return self.healthy
 
+    async def list_documents(self) -> list[DocumentSummary]:
+        summaries = []
+        for document_id, meta in self.documents.items():
+            chunks = [c for c in self.chunks if c["document_id"] == document_id]
+            summaries.append(
+                DocumentSummary(
+                    id=document_id,
+                    title=meta["title"],
+                    filename=meta["filename"],
+                    pages_count=self.page_counts.get(document_id)
+                    or max((int(c["page_number"]) for c in chunks), default=0),  # type: ignore[call-overload]
+                    chunks_count=len(chunks),
+                )
+            )
+        return summaries
+
     async def store_document(
-        self, *, title: str, filename: str, chunks: Sequence[ChunkRecord]
+        self,
+        *,
+        title: str,
+        filename: str,
+        chunks: Sequence[ChunkRecord],
+        page_count: int | None = None,
     ) -> uuid.UUID:
         document_id = uuid.uuid5(uuid.NAMESPACE_URL, f"{filename}:{title}:{len(self.documents)}")
         self.documents[str(document_id)] = {"title": title, "filename": filename}
+        self.page_counts[str(document_id)] = page_count
         for chunk in chunks:
             self.chunks.append(
                 {
@@ -143,6 +166,7 @@ class InMemoryStore:
                     "raw_content": chunk.raw_content,
                     "contextualized_content": chunk.contextualized_content,
                     "embedding": list(chunk.embedding),
+                    "page_map": [tuple(e) for e in chunk.page_map] if chunk.page_map else None,
                 }
             )
         return document_id
@@ -189,6 +213,7 @@ class InMemoryStore:
                 page_number=int(by_id[cid]["page_number"]),  # type: ignore[call-overload]
                 raw_content=str(by_id[cid]["raw_content"]),
                 contextualized_content=str(by_id[cid]["contextualized_content"]),
+                page_map=by_id[cid].get("page_map"),  # type: ignore[arg-type]
                 rrf_score=score,
                 dense_rank=dense_rank.get(cid),
                 sparse_rank=sparse_rank.get(cid),
@@ -320,11 +345,13 @@ def components(
         settings=settings,
         db=store,
         store=store,
+        catalogue=store,
         searcher=store,
         embedder=HashingEmbedder(EMBEDDING_DIMS),
         reranker=reranker,
         contextualizer=HeuristicContextualizer(),
         generator=generator,
+        budget=None,
     )
 
 

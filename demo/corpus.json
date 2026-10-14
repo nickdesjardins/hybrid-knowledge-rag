@@ -1,0 +1,49 @@
+{
+  "company": "Aurora Nutraceuticals Inc.",
+  "documents": [
+    {
+      "file": "SOP-QA-017-cleaning-validation.pdf",
+      "title": "SOP-QA-017 Cleaning Validation of Product-Contact Equipment (Rev 4)",
+      "pages": 2,
+      "questions": [
+        "What is the residue acceptance limit for product-contact equipment?",
+        "What swab recovery rate is required in cleaning validation?",
+        "How many consecutive successful cleaning runs are required to validate a cleaning procedure?",
+        "What is the maximum dirty hold time before cleaning must start?"
+      ]
+    },
+    {
+      "file": "SOP-QA-023-deviation-capa.pdf",
+      "title": "SOP-QA-023 Deviation Management and CAPA (Rev 2)",
+      "pages": 2,
+      "questions": [
+        "Within how many hours must a deviation be reported to Quality Assurance?",
+        "How many calendar days are allowed for a deviation investigation?",
+        "Who approves the closure of a critical deviation?",
+        "When is a CAPA effectiveness check performed?"
+      ]
+    },
+    {
+      "file": "POL-DOC-004-records-retention.pdf",
+      "title": "POL-DOC-004 Records Retention and Data Integrity Policy (Rev 3)",
+      "pages": 2,
+      "questions": [
+        "How long must batch records be retained after product expiry?",
+        "Which regulation governs electronic records and audit trails?",
+        "How often are electronic records backed up, and how often is a restore tested?",
+        "How long are training records kept after an employee leaves?"
+      ]
+    },
+    {
+      "file": "SOP-SC-009-supplier-qualification.pdf",
+      "title": "SOP-SC-009 Supplier Qualification and Incoming Inspection (Rev 5)",
+      "pages": 2,
+      "questions": [
+        "How often are critical suppliers audited?",
+        "What sampling plan applies to incoming excipients?",
+        "When is a supplier disqualified?",
+        "Is identity testing required on every container of active ingredient?"
+      ]
+    }
+  ]
+}

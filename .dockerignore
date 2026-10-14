@@ -1,11 +1,18 @@
+# The image needs only: requirements*.txt, app/ and demo/.
 .venv/
 .env
+.env.*
 .git/
+.github/
+.claude/
 .pytest_cache/
 .ruff_cache/
 __pycache__/
 *.pyc
 *.md
-!README.md
 tests/
 scripts/
+site/
+docs/
+render.yaml
+docker-compose.yml

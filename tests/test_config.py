@@ -27,9 +27,17 @@ def test_defaults_match_the_spec() -> None:
 
 @pytest.mark.parametrize("raw", ["", "  ", "none", "null"])
 def test_empty_temperature_and_api_key_mean_unset(raw: str) -> None:
-    settings = _settings(generation_temperature=raw, api_key=raw)
+    settings = _settings(generation_temperature=raw, api_key=raw, openrouter_api_key=raw)
     assert settings.generation_temperature is None
     assert settings.api_key is None
+    assert settings.openrouter_api_key is None
+
+
+def test_api_key_is_inbound_auth_not_a_provider_key() -> None:
+    settings = _settings(api_key="shared-secret", llm_provider="openrouter")
+    assert settings.api_key is not None
+    assert settings.openrouter_configured is False  # API_KEY never configures a provider
+    assert settings.generator_configured is False
 
 
 def test_temperature_is_parsed_and_bounded() -> None:
