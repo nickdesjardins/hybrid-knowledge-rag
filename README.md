@@ -747,6 +747,7 @@ hybrid-retrieval-engine/
 ├── requirements.txt
 ├── .env.example
 ├── pyproject.toml               # pytest (asyncio auto mode) + ruff config
+├── LICENSE                      # MIT; PyMuPDF itself is AGPL-3.0 (see License)
 ├── app/
 │   ├── config.py                # pydantic-settings (paid defaults + zero-cost switches)
 │   ├── openrouter.py            # free-model chain: fallback, strict schema -> JSON mode, pacing
@@ -806,3 +807,27 @@ intentionally out of scope here and land in later phases:
 - Observability: Langfuse tracing of every stage, token and cost telemetry (Phase 4).
 - Evaluation CI: golden query set, RAG-triad metrics, PR gating on faithfulness (Phase 4).
 - Redis semantic cache for repeated queries (Phase 4).
+
+---
+
+## License
+
+The code in this repository is released under the [MIT License](LICENSE): anyone may use, change,
+share and sell it, as long as copies keep the copyright notice and the license text. It comes as
+is, without warranty.
+
+One dependency is not permissive. [PyMuPDF](https://pymupdf.readthedocs.io/) (`pymupdf`), which
+reads the PDFs in `app/ingestion/pdf_parser.py` and writes the sample corpus in
+`scripts/make_demo_corpus.py`, is licensed under the
+[GNU AGPL v3](https://www.gnu.org/licenses/agpl-3.0.html) or under a commercial license from
+[Artifex](https://artifex.com/licensing/). The MIT license covers this repository's own code and
+cannot relax PyMuPDF's terms. Under the AGPL, a program built on PyMuPDF that is distributed, or
+offered to other people over a network, must make its complete source code available to them under
+the same license. The public demo meets that: its complete source is this repository. To build a
+closed product on this code, buy Artifex's commercial license or replace the parser with a
+permissively licensed PDF reader such as [pypdf](https://pypi.org/project/pypdf/) (BSD) or
+[pdfminer.six](https://pypi.org/project/pdfminer.six/) (MIT).
+
+The other packages in `requirements.txt` and `requirements-local-models.txt` are permissive (MIT,
+BSD or Apache 2.0). The embedding and re-ranking models that fastembed downloads keep the licenses
+stated on their Hugging Face model cards.
