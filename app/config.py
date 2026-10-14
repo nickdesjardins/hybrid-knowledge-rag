@@ -452,10 +452,34 @@ class Settings(BaseSettings):
             return None
         return normalize_database_url(value) if isinstance(value, str) else value
 
+    @field_validator("openrouter_api_key", mode="before")
+    @classmethod
+    def _clean_openrouter_key(cls, value: object) -> object:
+        """Strip what is copied along with a key, and refuse a value that is clearly not one.
+
+        Both secrets of the deployment come from the same file. Pasting the database string
+        into this box would send the database password to openrouter.ai as a bearer token on
+        every question, so start-up refuses it (without echoing it: hide_input_in_errors).
+        """
+        if not isinstance(value, str):
+            return value
+        text = value.strip()
+        if text.lower().startswith("openrouter_api_key="):
+            text = text[len("openrouter_api_key=") :].strip()
+        if len(text) >= 2 and text[0] == text[-1] and text[0] in {"'", '"'}:
+            text = text[1:-1].strip()
+        if text.lower() in {"", "none", "null"}:
+            return None
+        if "://" in text or any(ch.isspace() for ch in text):
+            raise ValueError(
+                "OPENROUTER_API_KEY does not look like an OpenRouter key (they start with "
+                "sk-or-); was another line pasted?"
+            )
+        return text
+
     @field_validator(
         "generation_temperature",
         "api_key",
-        "openrouter_api_key",
         "openrouter_site_url",
         "fastembed_threads",
         "client_ip_header",

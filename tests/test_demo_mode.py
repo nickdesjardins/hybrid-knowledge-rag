@@ -464,6 +464,25 @@ def test_database_url_survives_what_is_copied_along_with_it(pasted: str) -> None
     )
 
 
+def test_openrouter_key_box_refuses_the_database_string() -> None:
+    # Both values come from the same file. A swapped paste must stop start-up, not send the
+    # database password to openrouter.ai, and the error must not repeat the value.
+    from pydantic import ValidationError
+
+    def settings_with(key: str) -> Settings:
+        return Settings(_env_file=None, _env_prefix="HERMETIC_TEST_", openrouter_api_key=key)
+
+    with pytest.raises(ValidationError) as info:
+        settings_with("postgresql://u:Secret999@ep-x.aws.neon.tech/db?sslmode=require")
+    assert "Secret999" not in str(info.value) and "sk-or-" in str(info.value)
+
+    cleaned = settings_with('  "sk-or-v1-abc123"  ')
+    assert cleaned.openrouter_api_key.get_secret_value() == "sk-or-v1-abc123"
+    prefixed = settings_with("OPENROUTER_API_KEY=sk-or-v1-abc123")
+    assert prefixed.openrouter_api_key.get_secret_value() == "sk-or-v1-abc123"
+    assert settings_with("").openrouter_api_key is None
+
+
 def test_bad_database_url_is_refused_without_echoing_the_password() -> None:
     from pydantic import ValidationError
 

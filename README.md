@@ -7,11 +7,13 @@ context" instead of guessing.
 
 * **The project page:** <https://nickdesjardins.github.io/hybrid-knowledge-rag/> is the address to
   give to people. It is a static page on GitHub Pages: it is there at once, shows seven recorded
-  runs with their retrieval traces, and wakes the live demo while it is read.
-* **The live demo** runs at zero cost: free OpenRouter models for generation, local ONNX models
-  for embeddings and re-ranking, Neon for PostgreSQL, Render for hosting. It is closed on purpose:
-  uploads need the operator's key, questions are rate limited and capped per day, and the corpus
-  is four fictional quality documents. See [Public showcase](#public-showcase).
+  runs with a step-by-step walkthrough of each, and wakes the live demo while it is read.
+* **The live demo:** <https://hybrid-retrieval-engine.onrender.com/> runs at zero cost: free
+  OpenRouter models for generation, local ONNX models for embeddings and re-ranking, Neon for
+  PostgreSQL, Render for hosting. It sleeps between visits and takes about a minute to wake. It
+  is closed on purpose: uploads need the operator's key, questions are rate limited and capped
+  per day, and the corpus is four fictional quality documents. See
+  [Public showcase](#public-showcase).
 * **Putting it online:** [docs/DEPLOY.md](docs/DEPLOY.md) walks through it, and says exactly what
   has and has not been verified.
 
@@ -373,8 +375,8 @@ docker compose --profile full up --build
 ## Public showcase
 
 `DEMO_MODE=true` turns the service into something that can be left on the open internet on a
-free account. `render.yaml` sets it; `python scripts/run_local_demo.py` runs the same thing on
-your machine.
+free account. `render.yaml` sets it; `python scripts/run_local_demo.py` runs the app in demo mode
+on your machine, with the settings in `.env.local` (it does not read `render.yaml`).
 
 | | Normal mode | Demo mode |
 |---|---|---|
@@ -712,7 +714,7 @@ hybrid-retrieval-engine/
 │   ├── benchmark.py             # p50/p95/p99 latency against a running instance
 │   ├── make_demo_corpus.py      # writes the sample PDFs and their manifest
 │   ├── record_runs.py           # seeds the corpus and records the runs shown on the page
-│   ├── run_local_demo.py        # the showcase on your machine, as Render runs it
+│   ├── run_local_demo.py        # the showcase on your machine, in demo mode
 │   ├── openrouter_smoke.py      # live check of the free-model chain (1-2 free requests)
 │   └── run_live_db_tests.py     # live-DB tests on embedded PostgreSQL (pgserver)
 └── tests/                       # hermetic suite + opt-in live PostgreSQL tests

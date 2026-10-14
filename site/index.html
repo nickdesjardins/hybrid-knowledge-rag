@@ -63,11 +63,11 @@
         <p class="stackline">FastAPI · PostgreSQL · pgvector (HNSW) · tsvector (GIN) · Reciprocal Rank Fusion · cross-encoder re-ranking · strict JSON schema</p>
       </div>
       <div class="demo" id="demo" aria-label="Live demo">
-        <!-- THE ONE PLACE that holds the address of the live demo. Replace the host name that
-             ends in .invalid, once, with the name Render shows for the service (lower case,
-             ending in .onrender.com). Keep https:// before it and /#ask after it. Until then
-             the page says that the demo is not online yet, and asks nothing. -->
-        <a class="btn btn--primary btn--lg" id="demo-link" href="https://hybrid-retrieval-engine.invalid/#ask">Open the live demo</a>
+        <!-- THE ONE PLACE that holds the address of the live demo: the Render service's address
+             with /#ask after it, https:// written once. If the service is ever re-created under
+             another name, change it here; tests/test_site.py checks the form. With a host that
+             ends in .invalid, the page says the demo is not online yet and asks nothing. -->
+        <a class="btn btn--primary btn--lg" id="demo-link" href="https://hybrid-retrieval-engine.onrender.com/#ask">Open the live demo</a>
         <a class="btn btn--lg" href="https://github.com/nickdesjardins/hybrid-knowledge-rag">Code on GitHub</a>
         <p class="demo__line" id="demo-words" role="status">The live demo runs on free hosting and sleeps between visits. Opening it wakes it, which takes about a minute.</p>
         <p class="demo__cost">Runs at zero cost: free OpenRouter models for generation, local ONNX models for embeddings and re-ranking, serverless Postgres for storage.</p>

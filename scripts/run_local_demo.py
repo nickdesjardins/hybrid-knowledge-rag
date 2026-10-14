@@ -1,11 +1,13 @@
-"""Run the public showcase locally, exactly as Render runs it (demo mode on).
+"""Run the public showcase locally in demo mode, without Docker.
 
     python scripts/run_local_demo.py            # http://127.0.0.1:8011/
     python scripts/run_local_demo.py --port 9000
 
 Reads .env / .env.local for the OpenRouter key and the database URL, switches demo mode on
 (uploads closed, questions budgeted, corpus seeded from demo/ when missing), and serves the
-playground at "/".
+playground at "/". It does not read render.yaml, so production settings such as
+ENVIRONMENT=production (which hides /docs) and TOP_K_RETRIEVAL=10 apply only if .env.local sets
+them too.
 """
 
 from __future__ import annotations
