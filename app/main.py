@@ -216,6 +216,13 @@ async def build_components(settings: Settings) -> Components:
         )
 
     budget = QueryBudget(settings) if settings.demo_mode else None
+    # The scheduled job does the model testing; startup only reads its small published list.
+    from app.openrouter import OpenRouterChat
+
+    for component in (generator, contextualizer):
+        chat = getattr(component, "_chat", None)
+        if isinstance(chat, OpenRouterChat):
+            await chat.refresh_models()
     if settings.demo_mode:
         logger.info(
             "Demo mode: uploads %s, %d questions/client/min, %d/client/day, %d/min, %d/day, "

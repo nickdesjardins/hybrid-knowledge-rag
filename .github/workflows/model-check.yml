@@ -1,0 +1,141 @@
+# Discovery is daily; qualification is bounded and only runs when due.
+# The key-bearing job is read-only. Publication runs only git and standard-library Python.
+name: Model check
+
+on:
+  schedule:
+    - cron: "37 7 * * *"
+  workflow_dispatch:
+    inputs:
+      force:
+        description: "Qualify models now, even if no test is due"
+        type: boolean
+        default: false
+  push:
+    branches: [main]
+    paths:
+      - app/config.py
+      - app/model_check.py
+      - app/model_selection.py
+      - app/openrouter.py
+      - app/generator/grounded_llm.py
+      - app/ingestion/contextualizer.py
+      - requirements.txt
+      - .github/workflows/model-check.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: model-check
+  cancel-in-progress: false
+
+jobs:
+  test:
+    name: Discover and qualify free models
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    outputs:
+      file: ${{ steps.test.outputs.file }}
+      status: ${{ steps.test.outputs.status }}
+      reason: ${{ steps.test.outputs.reason }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -r requirements.txt
+      - name: Read previous tested chains
+        run: |
+          mkdir -p previous
+          found=0
+          git ls-remote --exit-code --heads origin tested-models > /dev/null || found=$?
+          if [ "$found" = 0 ]; then
+            git fetch --quiet --depth=1 origin tested-models
+            git show FETCH_HEAD:chain.json > previous/chain.json
+          elif [ "$found" != 2 ]; then
+            echo "::error::Cannot read the tested-models branch."
+            exit 1
+          fi
+      - name: Discover, qualify, and prepare publication
+        id: test
+        env:
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          FORCE: ${{ inputs.force }}
+        run: |
+          args=""
+          if [ "$FORCE" = true ]; then args="--force"; fi
+          status=0
+          python -m app.model_check --previous previous/chain.json --out out/chain.json $args || status=$?
+          echo "status=$status" >> "$GITHUB_OUTPUT"
+          if [ -f out/chain.json ]; then
+            echo "file=$(base64 --wrap=0 out/chain.json)" >> "$GITHUB_OUTPUT"
+          fi
+
+  publish:
+    name: Publish tested chains
+    needs: test
+    if: needs.test.outputs.file != '' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - name: Validate and write the tested-models branch
+        env:
+          FILE: ${{ needs.test.outputs.file }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          printf '%s' "$FILE" | base64 --decode > chain.json
+          python3 - <<'PY'
+          import json, os, re
+          from datetime import datetime, timezone, timedelta
+          assert os.path.getsize('chain.json') <= 64000
+          data = json.load(open('chain.json', encoding='utf-8'))
+          assert data['version'] == 1 and re.fullmatch(r'[a-f0-9]{16}', data['fingerprint'])
+          tested = datetime.strptime(data['tested'], '%Y-%m-%dT%H:%M:%SZ').replace(tzinfo=timezone.utc)
+          assert -timedelta(minutes=5) <= datetime.now(timezone.utc) - tested <= timedelta(days=14)
+          for role in ('generation', 'contextualizer'):
+              chain = data['chains'][role]
+              assert isinstance(chain, list) and 1 <= len(chain) <= 2
+              assert all(isinstance(m, str) and re.fullmatch(r'[a-z0-9][a-z0-9._-]{0,63}/[a-z0-9][a-z0-9._-]{0,95}:free', m) for m in chain)
+              assert len(set(chain)) == len(chain)
+          PY
+          remote="https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          git init --quiet branch
+          cd branch
+          found=0
+          git ls-remote --exit-code --heads "$remote" tested-models > /dev/null || found=$?
+          if [ "$found" = 0 ]; then
+            git fetch --quiet --depth=1 "$remote" tested-models
+            git checkout --quiet -b tested-models FETCH_HEAD
+          elif [ "$found" = 2 ]; then
+            git checkout --quiet --orphan tested-models
+          else
+            exit "$found"
+          fi
+          mv ../chain.json chain.json
+          git add chain.json
+          if git diff --cached --quiet; then exit 0; fi
+          git -c user.name="github-actions[bot]" -c user.email="41898282+github-actions[bot]@users.noreply.github.com" commit --quiet -m "Publish qualified free-model chains"
+          git push --quiet "$remote" tested-models
+          echo "Published qualified chains on tested-models." >> "$GITHUB_STEP_SUMMARY"
+
+  verdict:
+    name: Model check result
+    needs: [test, publish]
+    if: ${{ !cancelled() && needs.test.outputs.status != '0' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 2
+    steps:
+      - env:
+          REASON: ${{ needs.test.outputs.reason }}
+        run: |
+          if [ -n "$REASON" ]; then
+            printf '%s\n' "::error title=Model check failed::$REASON"
+          else
+            echo "::error::The discovery job failed before reporting a verdict. Read its first failed step."
+          fi
+          exit 1

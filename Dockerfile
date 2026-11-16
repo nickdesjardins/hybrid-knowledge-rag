@@ -9,6 +9,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
     FASTEMBED_CACHE_PATH=/srv/models \
+    MODEL_CACHE_PATH=/srv/models/tested-chain.json \
     # The app user has no home directory: give the Hugging Face client a cache it can write.
     HF_HOME=/srv/models/.hf \
     HF_HUB_DISABLE_TELEMETRY=1 \

@@ -343,7 +343,6 @@ class OpenRouterGroundedGenerator:
         from app.openrouter import OpenRouterChat, strict_json_schema
 
         self.models = settings.openrouter_model_chain
-        self.model = ",".join(self.models)
         self.max_tokens = settings.generation_max_tokens
         self.temperature = settings.generation_temperature
         self._schema = strict_json_schema(LLMGroundedOutput)
@@ -351,7 +350,13 @@ class OpenRouterGroundedGenerator:
             "\n\nThe JSON object MUST conform exactly to the following JSON Schema. Do not add "
             "keys, prose or markdown fences.\n" + json.dumps(self._schema, indent=2)
         )
-        self._chat = chat or OpenRouterChat(settings, models=self.models, client=client)
+        self._chat = chat or OpenRouterChat(
+            settings, models=self.models, client=client, role="generation"
+        )
+
+    @property
+    def model(self) -> str:
+        return ",".join(getattr(self._chat, "models", self.models))
 
     async def generate(self, query: str, chunks: Sequence[RerankedChunk]) -> GenerationResult:
         from app.openrouter import extract_json_object

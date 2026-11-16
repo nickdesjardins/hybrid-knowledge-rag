@@ -227,12 +227,17 @@ class OpenRouterContextualizer:
 
         self.settings = settings
         self.models = settings.openrouter_contextualizer_chain
-        self.model = ",".join(self.models)
         self.max_tokens = settings.contextualizer_max_tokens
         self.doc_max_chars = settings.contextualizer_doc_max_chars
         self._semaphore = asyncio.Semaphore(settings.contextualizer_concurrency)
-        self._chat = chat or OpenRouterChat(settings, models=self.models, client=client)
+        self._chat = chat or OpenRouterChat(
+            settings, models=self.models, client=client, role="contextualizer"
+        )
         self._fallback = HeuristicContextualizer()
+
+    @property
+    def model(self) -> str:
+        return ",".join(getattr(self._chat, "models", self.models))
 
     async def contextualize(self, document: ParsedDocument, chunks: list[Chunk]) -> list[str]:
         if not chunks:

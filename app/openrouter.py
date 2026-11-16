@@ -137,6 +137,7 @@ class OpenRouterChat:
         models: Sequence[str],
         client: object | None = None,
         limiter: RateLimiter | None = None,
+        role: str | None = None,
     ) -> None:
         from openai import AsyncOpenAI
 
@@ -159,6 +160,20 @@ class OpenRouterChat:
         )
         self.limiter = limiter or RateLimiter(settings.openrouter_requests_per_minute)
         self.strict_schema = settings.openrouter_strict_json_schema
+        self.selection = None
+        pinned = (
+            settings.openrouter_models
+            if role == "generation"
+            else settings.openrouter_contextualizer_models
+        )
+        if role and not pinned.strip() and client is None:
+            from app.model_selection import PublishedModels
+
+            self.selection = PublishedModels(settings, role)
+
+    async def refresh_models(self, *, after_failure: bool = False) -> None:
+        if self.selection is not None:
+            self.models[:] = await self.selection.refresh(after_failure=after_failure)
 
     async def complete(
         self,
@@ -177,9 +192,10 @@ class OpenRouterChat:
         withdrawal, truncation, empty output, and when ``validate`` raises on its text. When the
         strict schema is rejected, the same model is retried once in plain JSON mode.
         """
+        await self.refresh_models()
         failures: list[str] = []
         any_retryable = False
-        for model in self.models:
+        for model in tuple(self.models):
             modes = ["strict", "json"] if (schema and self.strict_schema) else ["json"]
             if schema is None:
                 modes = ["text"]
@@ -216,6 +232,7 @@ class OpenRouterChat:
                     logger.warning("OpenRouter model %s returned invalid output: %s", model, exc)
                     break
                 return outcome
+        await self.refresh_models(after_failure=True)
         raise ProviderError(
             "openrouter",
             f"all models failed ({'; '.join(failures)})",

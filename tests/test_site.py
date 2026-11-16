@@ -184,10 +184,14 @@ def test_recorded_runs_hold_no_secrets(record: dict) -> None:
         assert marker not in blob
 
 
-def test_recorded_stack_matches_the_code(record: dict) -> None:
+def test_recorded_stack_matches_its_responses_and_retrieval_settings(record: dict) -> None:
     settings = Settings(_env_file=None, _env_prefix="HERMETIC_TEST_")
     stack = record["stack"]
-    assert stack["generator_chain"] == settings.openrouter_model_chain
+    # This is an October recording, not a claim that those models remain available.
+    # Current defaults can rotate without rewriting the historical evidence.
+    assert all(
+        run["response"]["generation_model"] in stack["generator_chain"] for run in record["runs"]
+    )
     assert stack["embeddings"] == settings.fastembed_model
     assert stack["reranker"] == settings.fastembed_rerank_model
     assert stack["rrf_k"] == settings.rrf_k == 60

@@ -335,13 +335,15 @@ pip install -r requirements-local-models.txt       # fastembed (onnxruntime + mo
 python scripts/openrouter_smoke.py                  # 1-2 free requests: catalogue, allowance, one grounded answer
 ```
 
-How the OpenRouter path works (the same design as the Phase 1 extraction service):
+How the OpenRouter path works:
 
-- `OPENROUTER_MODELS` is an ordered chain. The first model is the primary; each later one is
-  tried only when the earlier ones fail (429, in-band upstream error, withdrawal, truncation,
-  invalid JSON). The default, `nvidia/nemotron-3-super-120b-a12b:free` then
-  `liquid/lfm-2.5-2.6b:free`, is the chain Phase 1 measured on 7 October 2026; both support
-  strict JSON-schema output and sit on different upstream providers.
+- Leave `OPENROUTER_MODELS` and `OPENROUTER_CONTEXTUALIZER_MODELS` blank for automatic
+  selection; an explicit comma-separated list pins that role. The first model is primary;
+  later models are tried after rate limits, upstream errors, withdrawal, truncation or invalid
+  JSON. The initial defaults are `baidu/ernie-5.5-flash-preview:free` and
+  `particle-ai/particle-1:free`, which passed this project's RAG and contextualizer cases on
+  16 November 2026 ([qualification evidence](benchmarks/2026-11-16-model-check.json)). The
+  October site recording remains historical evidence and still names the models it used.
 - Strict `json_schema` output is requested first. A model that rejects it is retried in plain
   JSON mode with the schema spelled out in the system prompt; code fences and surrounding prose
   are stripped before validation. `temperature=0.0` is sent.
@@ -354,6 +356,27 @@ How the OpenRouter path works (the same design as the Phase 1 extraction service
   do switch it to `openrouter`.
 - Free models are withdrawn often. The smoke script reports which chain ids the public catalogue
   still lists and how much of today's allowance remains.
+- The **Model check** Action reads the catalogue daily at 07:37 UTC, accepting only explicitly
+  zero-priced text models with structured-output support. It qualifies models when a current
+  model disappears, new candidates appear, the weekly check is due, or a forced run is requested.
+  Candidate evaluation rotates even when the current chains are full. Each run tests at most six
+  models, using three real grounded-answer cases (citations, unanswerable question and document
+  injection) and one contextualizer case, with this service's prompts, schemas and token limits.
+  At ten request starts per minute, the worst case is 42 requests including strict-schema retries;
+  the key's reported allowance further reduces the batch to retain ten visitor requests.
+- Qualified generation and contextualizer chains are published to `tested-models/chain.json`.
+  The server loads a local cache and refreshes at startup, hourly during successful traffic,
+  and after failures (at most once per minute), so sleeping demos and long-running instances
+  adopt updates. These reads make no model requests. Evidence must match the tested configuration
+  and be no more than 14 days old; unavailable or invalid publications retain the current chain.
+  Transient failures retain the last successful date, while bad credentials, broken required
+  behavior or having no usable selection produce actionable failures. This is bounded smoke
+  qualification, not proof of the best model or an exhaustive daily benchmark.
+- Configure the repository's `OPENROUTER_API_KEY` Actions secret for qualification.
+  `MODEL_REFRESH_SECONDS` controls runtime refresh (default 3600), `MODEL_CACHE_PATH` controls
+  local persistence, and `MODEL_PUBLISHED_URL=null` disables remote adoption. A pinned list
+  also disables automatic changes for its role. Runtime generation settings that differ from
+  the qualification settings reject that publication rather than silently claim compatibility.
 - **Data handling:** free endpoints may keep and train on what you send them. Use sample or
   redacted documents, never real compliance records, while running on free models.
 
@@ -598,7 +621,7 @@ All settings live in `app/config.py` and are read from the environment or `.env`
 | `DATABASE_URL` | `postgresql+asyncpg://rag:rag@localhost:5432/rag` | asyncpg driver required |
 | `EMBEDDING_PROVIDER` / `EMBEDDING_MODEL` / `EMBEDDING_DIMENSIONS` | `openai` / `text-embedding-3-small` / `1536` | Dimensions are baked into the `vector(N)` column; change them before first ingestion |
 | `LLM_PROVIDER` / `GENERATION_MODEL` / `GENERATION_EFFORT` | `anthropic` / `claude-opus-5-5` / `low` | `openai` and `openrouter` are the alternatives; effort is the Claude 5.x cost/latency lever |
-| `OPENROUTER_API_KEY` / `OPENROUTER_MODELS` / `OPENROUTER_FREE_ONLY` | unset / Phase 1 chain / `true` | Ordered `:free` chain with fallback; see the zero-cost section |
+| `OPENROUTER_API_KEY` / `OPENROUTER_MODELS` / `OPENROUTER_FREE_ONLY` | unset / automatic tested chain / `true` | An explicit model list pins the role; see the zero-cost section |
 | `CONTEXTUALIZER_PROVIDER` / `CONTEXTUALIZER_MODEL` | `auto` / `claude-haiku-5-5` | `heuristic` makes no model calls; `openrouter` costs one free request per chunk |
 | `RERANK_PROVIDER` / `COHERE_RERANK_MODEL` / `FASTEMBED_RERANK_MODEL` | `cohere` / `rerank-v3.5` / `Xenova/ms-marco-MiniLM-L-6-v2` | `fastembed` runs a local cross-encoder; `none` keeps RRF order |
 | `RRF_K` / `TOP_K_RETRIEVAL` / `TOP_K_RERANK` | `60` / `50` / `3` | The spec's fusion and narrowing parameters |

@@ -22,12 +22,10 @@ from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-#: Ordered default chain of free OpenRouter models. Inherited from the Phase 1 extraction
-#: service, where it was measured on 7 October 2026: the model with the fewest wrong answers
-#: first, a fallback from a different upstream provider second. Both support strict JSON-schema
-#: output. Free models are withdrawn often; ``scripts/openrouter_smoke.py`` reports which ids
-#: the public catalogue still lists.
-DEFAULT_OPENROUTER_CHAIN = "nvidia/nemotron-3-super-120b-a12b:free,liquid/lfm-2.5-2.6b:free"
+#: Free starting models, qualified against this service's grounded-answer and contextualizer
+#: prompts in benchmarks/2026-11-16-model-check.json. Automatic mode reads the daily job's
+#: current tested chains; explicitly named model settings remain pinned.
+DEFAULT_OPENROUTER_CHAIN = "baidu/ernie-5.5-flash-preview:free,particle-ai/particle-1:free"
 
 
 #: Matches docker-compose.yml.
@@ -326,16 +324,22 @@ class Settings(BaseSettings):
     )
     openrouter_base_url: str = "https://openrouter.ai/api/v1"
     openrouter_models: str = Field(
-        default=DEFAULT_OPENROUTER_CHAIN,
+        default="",
         description=(
             "Ordered, comma-separated chain for grounded generation. The first model is the "
             "primary; each later one is tried only when the earlier ones fail."
         ),
     )
     openrouter_contextualizer_models: str = Field(
-        default=DEFAULT_OPENROUTER_CHAIN,
+        default="",
         description="Chain used by the contextualizer when CONTEXTUALIZER_PROVIDER=openrouter.",
     )
+    model_published_url: str | None = (
+        "https://raw.githubusercontent.com/nickdesjardins/hybrid-knowledge-rag/"
+        "tested-models/chain.json"
+    )
+    model_cache_path: str = "model_cache.json"
+    model_refresh_seconds: float = Field(default=3600, ge=60)
     openrouter_embedding_model: str = Field(
         default="openai/text-embedding-3-small",
         description="EMBEDDING_PROVIDER=openrouter model. OpenRouter has no free embedding models.",
@@ -504,6 +508,7 @@ class Settings(BaseSettings):
         "generation_temperature",
         "api_key",
         "openrouter_site_url",
+        "model_published_url",
         "fastembed_threads",
         "client_ip_header",
         mode="before",
@@ -528,8 +533,9 @@ class Settings(BaseSettings):
             ("OPENROUTER_CONTEXTUALIZER_MODELS", self.openrouter_contextualizer_models),
         ):
             chain = parse_model_chain(raw)
-            if not chain:
-                raise ValueError(f"{name} must name at least one model id")
+            # Blank means automatic, with measured defaults until a published chain is read.
+            if raw.strip() and not chain:
+                raise ValueError(f"{name} must be blank or name at least one model id")
             if self.openrouter_free_only:
                 paid = [m for m in chain if not is_free_model(m)]
                 if paid:
@@ -570,11 +576,13 @@ class Settings(BaseSettings):
 
     @property
     def openrouter_model_chain(self) -> list[str]:
-        return parse_model_chain(self.openrouter_models)
+        return parse_model_chain(self.openrouter_models.strip() or DEFAULT_OPENROUTER_CHAIN)
 
     @property
     def openrouter_contextualizer_chain(self) -> list[str]:
-        return parse_model_chain(self.openrouter_contextualizer_models)
+        return parse_model_chain(
+            self.openrouter_contextualizer_models.strip() or DEFAULT_OPENROUTER_CHAIN
+        )
 
     @property
     def anthropic_configured(self) -> bool:
