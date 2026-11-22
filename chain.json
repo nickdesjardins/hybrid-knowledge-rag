@@ -188,5 +188,7 @@
         }
       ]
     }
-  ]
+  ],
+  "failed_models": {},
+  "unavailable_roles": []
 }
